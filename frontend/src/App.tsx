@@ -1,5 +1,6 @@
 import {useEffect,useState,FormEvent,ReactNode} from 'react';
 import {api,login,logout,Row} from './lib/api';
+import ApprovalContent from './ApprovalContent';
 const names:Record<string,string>={DRAFT:'Nháp',RECEIVING:'Chờ kiểm nhận',DISCREPANCY:'Có sai lệch',PENDING:'Chờ duyệt',RETURNED:'Trả bổ sung',READY:'Sẵn sàng',POSTED:'Hoàn tất',CANCELLED:'Đã hủy',OPEN:'Đang mở',CLOSED:'Đã khóa',WAITING:'Chưa phân công',ASSIGNED:'Đã phân công',COUNTING:'Đang đếm',COUNTED:'Chờ đối chiếu',VARIANCE:'Chênh lệch',RECOUNT:'Cần đếm lại',MATCHED:'Khớp',ADJUSTED:'Đã điều chỉnh',PICKING:'Đang soạn',PICKED:'Đã soạn đủ',ISSUE:'Thiếu/sai hàng',ACTIVE:'Đang giữ',RELEASED:'Đã giải phóng',CONSUMED:'Đã tiêu thụ',APPROVED:'Đã duyệt',REJECTED:'Từ chối',SUPERSEDED:'Hết hiệu lực',IN_PROGRESS:'Đang xử lý',RESOLVED:'Đã đóng'};
 const num=(v:unknown)=>Number(v||0).toLocaleString('vi-VN',{maximumFractionDigits:3});
 const fmt=(v:any)=>v===null||v===undefined?'—':typeof v==='boolean'?v?'Đang dùng':'Ngừng dùng':typeof v==='object'?JSON.stringify(v):String(v);
@@ -54,7 +55,18 @@ export default function App(){
  if(title==='Đề nghị sửa nhập')return <><Input label="Lý do" value={draft.reason} set={v=>update('reason',v)}/>{draft.lines.map((l:Row,i:number)=><div className="line" key={i}><strong>Dòng {l.lineNo}</strong><Input label="Chênh lệch tồn (+ tăng / − giảm)" value={l.deltaBook} set={v=>lineChange(i,'deltaBook',v)}/><Input label="Chênh lệch lượng bị chặn" value={l.deltaBlocked} set={v=>lineChange(i,'deltaBlocked',v)}/></div>)}<p className="muted">Chỉ gửi những dòng có thay đổi. Hồ sơ chờ duyệt không đổi tồn.</p></>;
  return <><p className="muted">{title==='Duyệt hồ sơ'?'Chấp thuận hồ sơ theo đúng phiên bản đang xem.':'Xác nhận thao tác với hồ sơ đang chọn.'}</p>{'reason'in draft&&<Field label="Chứng cứ (PDF / PNG / JPEG, tối đa 5 MB)"><input type="file" accept="application/pdf,image/png,image/jpeg" onChange={async e=>{const f=e.target.files?.[0];if(!f)return;const data=new FormData();data.append('file',f);await run(async()=>{const saved=await api(root+'/evidence',data);update('evidenceIds',[...(draft.evidenceIds||[]),saved.id])})}}/>{draft.evidenceIds?.length>0&&<small>Đã đính kèm {draft.evidenceIds.length} tệp.</small>}</Field>}{'reason'in draft&&<Input label="Lý do / giải trình" value={draft.reason} set={v=>update('reason',v)}/ >}{'resolution'in draft&&<Input label="Biện pháp xử lý" value={draft.resolution} set={v=>update('resolution',v)}/ >}{'note'in draft&&<Input label="Nhận xét" value={draft.note} set={v=>update('note',v)} required={false}/ >}{'returnedPicked'in draft&&<label className="check"><input type="checkbox" checked={draft.returnedPicked} onChange={e=>update('returnedPicked',e.target.checked)}/>Đã hoàn trả toàn bộ hàng đã soạn (nếu có)</label>}</>;
  }
- async function openRow(r:Row){if(page==='inbound'||page==='outbound'||page==='counting'){await run(async()=>setDetail(await api(root+(page==='inbound'?'/receipts/':page==='outbound'?'/shipments/':'/count-sessions/')+r.id)), '');}else setDetail(r)}
+ async function openRow(r:Row){
+  if(busy)return;
+  if(page==='inbound'||page==='outbound'||page==='counting'){
+   setBusy(true);setError('');
+   try{
+    const path=page==='inbound'?'/receipts/':page==='outbound'?'/shipments/':'/count-sessions/';
+    const record=await api(root+path+r.id);
+    setDetail(record);
+   }catch(e){setError((e as Error).message);}
+   finally{setBusy(false);}
+  }else setDetail(r);
+ }
  const filtered=rows.filter(r=>JSON.stringify(r).toLocaleLowerCase().includes(query.toLocaleLowerCase()));
  function actionButton(label:string,action:string,extra:Row={},title=label){const type=page==='inbound'?'receipts':page==='outbound'?'shipments':'count-sessions';return <button className="secondary" onClick={()=>command(title,`/${type}/${detail!.id}/${action}`,{version:detail!.version,...extra})}>{label}</button>}
  function detailPanel(){if(!detail)return null;return <aside className="detail"><div className="section-head"><div><p className="eyebrow">CHI TIẾT HỒ SƠ</p><h2>{detail.code||'#'+detail.id}</h2></div><button className="icon-btn" onClick={()=>setDetail(null)} aria-label="Đóng chi tiết">×</button></div><div className="detail-meta"><Badge value={detail.status}/>{detail.version!==undefined&&<span>Phiên bản {detail.version}</span>}<span>{detail.source_ref||''}</span></div>
@@ -69,7 +81,7 @@ export default function App(){
  {page==='stock'&&tab==='alerts'&&isManager&&detail.status!=='RESOLVED'&&<button className="secondary" onClick={()=>command('Tiếp nhận cảnh báo',`/alerts/${detail.id}/handle`,{version:detail.version,resolution:''})}>Tiếp nhận xử lý</button>}
  {page==='approval'&&detail.status==='PENDING'&&<>{[true,false].map(accept=>{const type=detail.receipt_id?'receipts':detail.shipment_id?'shipments':'adjustments';const id=detail.receipt_id||detail.shipment_id||detail.adjustment_id;return <button key={String(accept)} className={accept?'primary':'secondary'} onClick={()=>command(accept?'Duyệt hồ sơ':'Từ chối hồ sơ',`/${type}/${id}/decision`,{version:detail.target_version,accept,...(!accept?{reason:''}:{})})}>{accept?'Chấp thuận':'Từ chối'}</button>})}</>}
  </div>
- {page==='approval'&&<div className="snapshot"><h3>Nội dung đã trình</h3><pre>{JSON.stringify(typeof detail.payload==='string'?JSON.parse(detail.payload):detail.payload,null,2)}</pre></div>}
+ {page==='approval'&&<ApprovalContent approval={detail} catalog={catalog}/>}
  {page==='counting'&&detail.items?.map((i:Row)=><div className="count-card" key={i.id}><div className="section-head"><strong>{i.location_code} / {i.sku_code}</strong><Badge value={i.status}/></div><p>Người đếm: {i.assigned_to||'Chưa giao'} · Sổ T0: {num(i.book_at_t0)} · Đếm: {i.counted_qty??'—'} · Delta: {i.delta??'—'}</p><div className="actions">{[...(isManager&&['WAITING','ASSIGNED'].includes(i.status)?[['Phân công','assign',{username:''}]]:[]),...(isStaff&&['ASSIGNED','RECOUNT'].includes(i.status)?[['Bắt đầu đếm','start',{}]]:[]),...(isStaff&&i.status==='COUNTING'?[['Ghi kết quả đếm','record',{qty:''}]]:[]),...(['ACT02','ACT03'].includes(role)&&i.status==='COUNTED'?[['Đối chiếu','reconcile',{}]]:[]),...(isStaff&&i.status==='VARIANCE'?[['Lập đề nghị','request-adjustment',{reason:''}]]:[]),...(isManager&&['COUNTING','COUNTED','VARIANCE','PENDING','MATCHED'].includes(i.status)?[['Yêu cầu đếm lại','recount',{reason:''}]]:[])].map(([label,action,extra]:any)=><button key={action} className="secondary" onClick={()=>command(label,`/count-items/${i.id}/${action}`,{version:i.version,...extra})}>{label}</button>)}</div></div>)}
  {!detail.lines&&!detail.items&&page!=='approval'&&<dl>{Object.entries(detail).filter(([,v])=>typeof v!=='object').map(([k,v])=><div key={k}><dt>{k}</dt><dd>{fmt(v)}</dd></div>)}</dl>}
  </aside>}
