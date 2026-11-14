@@ -1,0 +1,28 @@
+server:
+  port: 8080
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${COOKIE_SECURE:false}
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/slms?currentSchema=m01}
+    username: ${DB_USER:slms}
+    password: ${DB_PASSWORD}
+  flyway:
+    default-schema: m01
+    create-schemas: true
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+slms:
+  bootstrap-password: ${BOOTSTRAP_PASSWORD:}
+  approval-threshold: ${APPROVAL_THRESHOLD:1000}
+  evidence-dir: ${EVIDENCE_DIR:./data/evidence}
