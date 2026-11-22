@@ -1,12 +1,169 @@
 package vn.ptit.slms.adjustment;
-import vn.ptit.slms.common.*;import vn.ptit.slms.security.*;import vn.ptit.slms.stock.*;import vn.ptit.slms.approval.*;import org.springframework.stereotype.Service;import java.util.*;import java.math.*;import static vn.ptit.slms.common.Db.*;
-@Service public class AdjustmentService {
- private final Db db;private final AccessGuard g;private final StockService stock;private final ApprovalService approval;private final Json json;
- public AdjustmentService(Db d,AccessGuard g,StockService s,ApprovalService a,Json j){db=d;this.g=g;stock=s;approval=a;json=j;}
- @SuppressWarnings("unchecked") public Object correction(long w,long receipt,Map<String,Object> p){g.roles("ACT02","ACT03");var r=db.one("select * from receipt where warehouse_id=? and id=? and status='POSTED' for update",w,receipt);Problem.require(lng(r.get("version"))==lng(p.get("version")),"STALE_VERSION","Tải lại phiếu nhập.");boolean reverse=Boolean.TRUE.equals(p.get("reverse"));long id=db.id("insert into adjustment(warehouse_id,kind,receipt_id,receipt_rev,status,created_by,reason) values (?,?,?,?,'PENDING',?,?) returning id",w,reverse?"IN_REVERSE":"IN_CORRECT",receipt,r.get("correction_rev"),g.actor(),required(p,"reason"));var inputs=(List<Map<String,Object>>)p.get("lines");if(reverse){Problem.require(db.id("select count(*) from adjustment where receipt_id=? and kind='IN_REVERSE' and status='POSTED'",receipt)==0,"ALREADY_REVERSED","Phiếu đã được đảo.");inputs=new ArrayList<>();for(var src:db.rows("select l.line_no,l.accepted_qty+coalesce(sum(al.delta_book) filter(where a.status='POSTED'),0) remaining_book,l.blocked_qty+coalesce(sum(al.delta_blocked) filter(where a.status='POSTED'),0) remaining_blocked from receipt_line l left join adjustment a on a.receipt_id=l.receipt_id left join adjustment_line al on al.adjustment_id=a.id and al.original_line_no=l.line_no where l.receipt_id=? group by l.line_no,l.accepted_qty,l.blocked_qty",receipt))inputs.add(Map.of("lineNo",src.get("line_no"),"deltaBook",dec(src.get("remaining_book")).negate(),"deltaBlocked",dec(src.get("remaining_blocked")).negate()));}Problem.require(inputs!=null&&!inputs.isEmpty(),"LINES","Thiếu dòng điều chỉnh.");Set<Long> seen=new HashSet<>();int n=0;for(var l:inputs){long no=lng(l.get("lineNo"));Problem.require(seen.add(no),"LINES","Dòng lặp.");var src=db.one("select * from receipt_line where receipt_id=? and line_no=?",receipt,no);var delta=dec(l.get("deltaBook"));var blocked=dec(l.getOrDefault("deltaBlocked","0"));if(delta.signum()==0&&blocked.signum()==0)continue;Problem.require(delta.scale()<=3&&blocked.scale()<=3,"DELTA","Delta phải khác 0, tối đa 3 chữ số lẻ.");db.run("insert into adjustment_line(adjustment_id,line_no,warehouse_id,location_id,sku_id,original_line_no,delta_book,delta_blocked) values (?,?,?,?,?,?,?,?)",id,++n,w,src.get("location_id"),src.get("sku_id"),no,delta,blocked);}db.run("update adjustment set evidence=?::jsonb where id=?",json.write(p.getOrDefault("evidenceIds",List.of())),id);Problem.require(n>0,"DELTA","Cần ít nhất một dòng có thay đổi.");approval.submit(w,"adjustment",id,0,g.actor(),BigDecimal.ZERO,db.rows("select * from adjustment_line where adjustment_id=?",id),true);return Map.of("id",id,"status","PENDING");}
- public Object decide(long w,long id,Map<String,Object> p){var origin=db.one("select * from adjustment where warehouse_id=? and id=?",w,id);if(origin.get("receipt_id")!=null)db.one("select * from receipt where id=? for update",origin.get("receipt_id"));if(origin.get("count_attempt_id")!=null){var src=db.one("select i.session_id,i.id from count_attempt a join count_item i on i.id=a.item_id where a.id=?",origin.get("count_attempt_id"));db.one("select * from count_session where id=? for update",src.get("session_id"));db.one("select * from count_item where id=? for update",src.get("id"));}
- var a=db.one("select * from adjustment where warehouse_id=? and id=? for update",w,id);Problem.require(a.get("status").equals("PENDING")&&lng(a.get("version"))==lng(p.get("version")),"STALE_VERSION","Đề nghị không còn chờ duyệt hoặc đã thay đổi.");boolean accept=Boolean.TRUE.equals(p.get("accept"));approval.decide(w,"adjustment",id,lng(a.get("version")),accept,text(p,"reason"));if(accept){if(a.get("count_attempt_id")!=null)db.one("select * from count_attempt where id=? and superseded_at is null",a.get("count_attempt_id"));if(a.get("receipt_id")!=null){var r=db.one("select * from receipt where id=?",a.get("receipt_id"));Problem.require(lng(r.get("correction_rev"))==lng(a.get("receipt_rev")),"STALE_SOURCE","Phiếu đã có điều chỉnh khác.");}
- var lines=db.rows("select * from adjustment_line where adjustment_id=? order by sku_id,location_id",id);stock.lock(w,lines.stream().map(l->new StockService.Key(lng(l.get("location_id")),lng(l.get("sku_id")))).toList());long batch=stock.batch(w,"ADJ",id);Map<StockService.Key,BigDecimal[]> totals=new TreeMap<>();for(var l:lines){var k=new StockService.Key(lng(l.get("location_id")),lng(l.get("sku_id")));var t=totals.computeIfAbsent(k,x->new BigDecimal[]{BigDecimal.ZERO,BigDecimal.ZERO});t[0]=t[0].add(dec(l.get("delta_book")));t[1]=t[1].add(dec(l.get("delta_blocked")));}for(var e:totals.entrySet())if(e.getValue()[0].signum()!=0||e.getValue()[1].signum()!=0)stock.movement(w,batch,e.getKey(),e.getValue()[0],e.getValue()[1]);if(a.get("receipt_id")!=null)db.run("update receipt set correction_rev=correction_rev+1,version=version+1 where id=?",a.get("receipt_id"));}
- db.run("update adjustment set status=?,version=version+1 where id=?",accept?"POSTED":"REJECTED",id);if(a.get("count_attempt_id")!=null)db.run("update count_item set status=?,version=version+1 where id=(select item_id from count_attempt where id=?)",accept?"ADJUSTED":"VARIANCE",a.get("count_attempt_id"));return Map.of("id",id,"status",accept?"POSTED":"REJECTED");}
- public Object list(long w){g.warehouse(w);return db.rows("select a.*, (select jsonb_agg(to_jsonb(l)) from adjustment_line l where l.adjustment_id=a.id) lines from adjustment a where warehouse_id=? order by id desc limit 200",w);}
+
+import static vn.ptit.slms.common.Db.*;
+
+import java.math.*;
+import java.util.*;
+import org.springframework.stereotype.Service;
+import vn.ptit.slms.approval.*;
+import vn.ptit.slms.common.*;
+import vn.ptit.slms.security.*;
+import vn.ptit.slms.stock.*;
+
+@Service
+public class AdjustmentService {
+
+    private final Db db;
+    private final AccessGuard g;
+    private final StockService stock;
+    private final ApprovalService approval;
+    private final Json json;
+
+    public AdjustmentService(Db d, AccessGuard g, StockService s, ApprovalService a, Json j) {
+        db = d;
+        this.g = g;
+        stock = s;
+        approval = a;
+        json = j;
+    }
+
+    /**
+     * Người viết: Đào Khánh Ninh
+     * Ngày viết: 2026-11-13
+     * Use case: UC-IN-007
+     *
+     * Lập đề nghị điều chỉnh hoặc đảo phần nhập còn lại của phiếu đã chốt.
+     * Kiểm tra phiên bản phiếu POSTED; cần lý do và ít nhất một dòng thay đổi. Đề nghị được chuyển
+     * cấp lãnh đạo duyệt.
+     */
+    @SuppressWarnings("unchecked")
+    public Object correction(long w, long receipt, Map<String, Object> p) {
+        g.roles("ACT02", "ACT03");
+        var r = db.one(
+                "select * from receipt where warehouse_id=? and id=? and status='POSTED' for update",
+                w, receipt);
+        Problem.require(lng(r.get("version")) == lng(p.get("version")), "STALE_VERSION",
+                "Tải lại phiếu nhập.");
+        boolean reverse = Boolean.TRUE.equals(p.get("reverse"));
+        long id = db.id(
+                "insert into adjustment(warehouse_id,kind,receipt_id,receipt_rev,status,created_by,reason) values (?,?,?,?,'PENDING',?,?) returning id",
+                w, reverse ? "IN_REVERSE" : "IN_CORRECT", receipt, r.get("correction_rev"),
+                g.actor(), required(p, "reason"));
+        var inputs = (List<Map<String, Object>>) p.get("lines");
+        if (reverse) {
+            Problem.require(db.id(
+                    "select count(*) from adjustment where receipt_id=? and kind='IN_REVERSE' and status='POSTED'",
+                    receipt) == 0, "ALREADY_REVERSED", "Phiếu đã được đảo.");
+            inputs = new ArrayList<>();
+            for (var src : db.rows(
+                    "select l.line_no,l.accepted_qty+coalesce(sum(al.delta_book) filter(where a.status='POSTED'),0) remaining_book,l.blocked_qty+coalesce(sum(al.delta_blocked) filter(where a.status='POSTED'),0) remaining_blocked from receipt_line l left join adjustment a on a.receipt_id=l.receipt_id left join adjustment_line al on al.adjustment_id=a.id and al.original_line_no=l.line_no where l.receipt_id=? group by l.line_no,l.accepted_qty,l.blocked_qty",
+                    receipt))
+                inputs.add(Map.of("lineNo", src.get("line_no"), "deltaBook",
+                        dec(src.get("remaining_book")).negate(), "deltaBlocked",
+                        dec(src.get("remaining_blocked")).negate()));
+        }
+        Problem.require(inputs != null && !inputs.isEmpty(), "LINES", "Thiếu dòng điều chỉnh.");
+        Set<Long> seen = new HashSet<>();
+        int n = 0;
+        for (var l : inputs) {
+            long no = lng(l.get("lineNo"));
+            Problem.require(seen.add(no), "LINES", "Dòng lặp.");
+            var src = db.one("select * from receipt_line where receipt_id=? and line_no=?", receipt,
+                    no);
+            var delta = dec(l.get("deltaBook"));
+            var blocked = dec(l.getOrDefault("deltaBlocked", "0"));
+            if (delta.signum() == 0 && blocked.signum() == 0)
+                continue;
+            Problem.require(delta.scale() <= 3 && blocked.scale() <= 3, "DELTA",
+                    "Delta phải khác 0, tối đa 3 chữ số lẻ.");
+            db.run("insert into adjustment_line(adjustment_id,line_no,warehouse_id,location_id,sku_id,original_line_no,delta_book,delta_blocked) values (?,?,?,?,?,?,?,?)",
+                    id, ++n, w, src.get("location_id"), src.get("sku_id"), no, delta, blocked);
+        }
+        db.run("update adjustment set evidence=?::jsonb where id=?",
+                json.write(p.getOrDefault("evidenceIds", List.of())), id);
+        Problem.require(n > 0, "DELTA", "Cần ít nhất một dòng có thay đổi.");
+        approval.submit(w, "adjustment", id, 0, g.actor(), BigDecimal.ZERO,
+                db.rows("select * from adjustment_line where adjustment_id=?", id), true);
+        return Map.of("id", id, "status", "PENDING");
+    }
+
+    /**
+     * Người viết: Đào Khánh Ninh
+     * Ngày viết: 2026-11-14
+     * Use case: UC-IN-007, UC-CNT-006
+     *
+     * Duyệt hoặc từ chối đề nghị điều chỉnh nhập kho hoặc kiểm kê.
+     * Khóa hồ sơ nguồn và đề nghị; chỉ áp dụng khi phiên bản nguồn, lượt đếm và cấp duyệt còn hợp
+     * lệ. Duyệt thành công ghi biến động tồn trong giao dịch của bên gọi.
+     */
+    public Object decide(long w, long id, Map<String, Object> p) {
+        var origin = db.one("select * from adjustment where warehouse_id=? and id=?", w, id);
+        if (origin.get("receipt_id") != null)
+            db.one("select * from receipt where id=? for update", origin.get("receipt_id"));
+        if (origin.get("count_attempt_id") != null) {
+            var src = db.one(
+                    "select i.session_id,i.id from count_attempt a join count_item i on i.id=a.item_id where a.id=?",
+                    origin.get("count_attempt_id"));
+            db.one("select * from count_session where id=? for update", src.get("session_id"));
+            db.one("select * from count_item where id=? for update", src.get("id"));
+        }
+        var a = db.one("select * from adjustment where warehouse_id=? and id=? for update", w, id);
+        Problem.require(
+                a.get("status").equals("PENDING") && lng(a.get("version")) == lng(p.get("version")),
+                "STALE_VERSION", "Đề nghị không còn chờ duyệt hoặc đã thay đổi.");
+        boolean accept = Boolean.TRUE.equals(p.get("accept"));
+        approval.decide(w, "adjustment", id, lng(a.get("version")), accept, text(p, "reason"));
+        if (accept) {
+            if (a.get("count_attempt_id") != null)
+                db.one("select * from count_attempt where id=? and superseded_at is null",
+                        a.get("count_attempt_id"));
+            if (a.get("receipt_id") != null) {
+                var r = db.one("select * from receipt where id=?", a.get("receipt_id"));
+                Problem.require(lng(r.get("correction_rev")) == lng(a.get("receipt_rev")),
+                        "STALE_SOURCE", "Phiếu đã có điều chỉnh khác.");
+            }
+            var lines = db.rows(
+                    "select * from adjustment_line where adjustment_id=? order by sku_id,location_id",
+                    id);
+            stock.lock(w, lines.stream()
+                    .map(l -> new StockService.Key(lng(l.get("location_id")), lng(l.get("sku_id"))))
+                    .toList());
+            long batch = stock.batch(w, "ADJ", id);
+            Map<StockService.Key, BigDecimal[]> totals = new TreeMap<>();
+            for (var l : lines) {
+                var k = new StockService.Key(lng(l.get("location_id")), lng(l.get("sku_id")));
+                var t = totals.computeIfAbsent(k,
+                        x -> new BigDecimal[] { BigDecimal.ZERO, BigDecimal.ZERO, });
+                t[0] = t[0].add(dec(l.get("delta_book")));
+                t[1] = t[1].add(dec(l.get("delta_blocked")));
+            }
+            for (var e : totals.entrySet())
+                if (e.getValue()[0].signum() != 0 || e.getValue()[1].signum() != 0)
+                    stock.movement(w, batch, e.getKey(), e.getValue()[0], e.getValue()[1]);
+            if (a.get("receipt_id") != null)
+                db.run("update receipt set correction_rev=correction_rev+1,version=version+1 where id=?",
+                        a.get("receipt_id"));
+        }
+        db.run("update adjustment set status=?,version=version+1 where id=?",
+                accept ? "POSTED" : "REJECTED", id);
+        if (a.get("count_attempt_id") != null)
+            db.run("update count_item set status=?,version=version+1 where id=(select item_id from count_attempt where id=?)",
+                    accept ? "ADJUSTED" : "VARIANCE", a.get("count_attempt_id"));
+        return Map.of("id", id, "status", accept ? "POSTED" : "REJECTED");
+    }
+
+    /**
+     * Người viết: Đào Khánh Ninh
+     * Ngày viết: 2026-11-14
+     * Use case: UC-IN-007, UC-CNT-006
+     *
+     * Tra cứu các đề nghị điều chỉnh và dòng chênh lệch trong kho.
+     * Người dùng phải được cấp quyền kho; trả tối đa 200 đề nghị mới nhất.
+     */
+    public Object list(long w) {
+        g.warehouse(w);
+        return db.rows(
+                "select a.*, (select jsonb_agg(to_jsonb(l)) from adjustment_line l where l.adjustment_id=a.id) lines from adjustment a where warehouse_id=? order by id desc limit 200",
+                w);
+    }
 }

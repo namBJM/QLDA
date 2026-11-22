@@ -1,102 +1,2117 @@
-import {useEffect,useState,FormEvent,ReactNode} from 'react';
-import {api,login,logout,Row} from './lib/api';
+import { useEffect, useState, FormEvent, ReactNode } from 'react';
+import { api, login, logout, Row } from './lib/api';
 import ApprovalContent from './ApprovalContent';
-const names:Record<string,string>={DRAFT:'Nháp',RECEIVING:'Chờ kiểm nhận',DISCREPANCY:'Có sai lệch',PENDING:'Chờ duyệt',RETURNED:'Trả bổ sung',READY:'Sẵn sàng',POSTED:'Hoàn tất',CANCELLED:'Đã hủy',OPEN:'Đang mở',CLOSED:'Đã khóa',WAITING:'Chưa phân công',ASSIGNED:'Đã phân công',COUNTING:'Đang đếm',COUNTED:'Chờ đối chiếu',VARIANCE:'Chênh lệch',RECOUNT:'Cần đếm lại',MATCHED:'Khớp',ADJUSTED:'Đã điều chỉnh',PICKING:'Đang soạn',PICKED:'Đã soạn đủ',ISSUE:'Thiếu/sai hàng',ACTIVE:'Đang giữ',RELEASED:'Đã giải phóng',CONSUMED:'Đã tiêu thụ',APPROVED:'Đã duyệt',REJECTED:'Từ chối',SUPERSEDED:'Hết hiệu lực',IN_PROGRESS:'Đang xử lý',RESOLVED:'Đã đóng'};
-const num=(v:unknown)=>Number(v||0).toLocaleString('vi-VN',{maximumFractionDigits:3});
-const fmt=(v:any)=>v===null||v===undefined?'—':typeof v==='boolean'?v?'Đang dùng':'Ngừng dùng':typeof v==='object'?JSON.stringify(v):String(v);
-function Badge({value}:{value:any}){return <span className={'badge '+(['POSTED','MATCHED','ADJUSTED','APPROVED','RESOLVED'].includes(value)?'green':['CANCELLED','REJECTED','VARIANCE','ISSUE'].includes(value)?'red':'')}>{names[value]||fmt(value)}</span>}
-function Table({rows,columns,onRow}:{rows:Row[],columns:[string,string][],onRow?:(r:Row)=>void}){return <div className="table-wrap"><table><thead><tr>{columns.map(([k,l])=><th key={k}>{l}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={r.id||i} onClick={()=>onRow?.(r)} className={onRow?'clickable':''}>{columns.map(([k])=><td key={k}>{k==='status'?<Badge value={r[k]}/>:fmt(r[k])}</td>)}</tr>)}</tbody></table>{!rows.length&&<div className="empty"><span>▦</span><h3>Chưa có dữ liệu</h3><p>Tạo bản ghi đầu tiên hoặc thay đổi điều kiện tra cứu.</p></div>}</div>}
-function Field({label,children}:{label:string,children:ReactNode}){return <label className="field"><span>{label}</span>{children}</label>}
-function Input({label,value,set,type='text',required=true}:{label:string,value:any,set:(v:string)=>void,type?:string,required?:boolean}){return <Field label={label}><input type={type} value={value??''} onChange={e=>set(e.target.value)} required={required} step={type==='number'?'0.001':undefined} min={type==='number'?'0':undefined}/></Field>}
-function Select({label,value,set,rows,labelKey='name',idKey='id',optional=false}:{label:string,value:any,set:(v:string)=>void,rows:Row[],labelKey?:string,idKey?:string,optional?:boolean}){return <Field label={label}><select value={value??''} onChange={e=>set(e.target.value)} required={!optional}><option value="">Chọn…</option>{rows.map(r=><option value={r[idKey]} key={r[idKey]}>{r.code?r.code+' · ':''}{r[labelKey]}</option>)}</select></Field>}
-type Dialog={title:string,render:()=>ReactNode,submit:()=>Promise<void>};
-export default function App(){
- const [me,setMe]=useState<Row|null>(null),[checking,setChecking]=useState(true),[warehouse,setWarehouse]=useState(''),[page,setPage]=useState('overview'),[tab,setTab]=useState('locations'),[rows,setRows]=useState<Row[]>([]),[catalog,setCatalog]=useState<Row>({locations:[],skus:[],uoms:[],users:[]}),[detail,setDetail]=useState<Row|null>(null),[query,setQuery]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(false),[modal,setModal]=useState<Dialog|null>(null),[draft,setDraft]=useState<Row>({}),[revision,setRevision]=useState(0),[username,setUsername]=useState(''),[password,setPassword]=useState(''),[from,setFrom]=useState(new Date(new Date().getFullYear(),new Date().getMonth(),1).toISOString().slice(0,10)),[to,setTo]=useState(new Date().toISOString().slice(0,10));
- const root=`/api/v1/m01/warehouses/${warehouse}`;const role=me?.role;const isManager=role==='ACT02';const isStaff=role==='ACT03';
- useEffect(()=>{api('/api/auth/me').then(u=>{setMe(u);setWarehouse(String(u.warehouses[0]?.id||''))}).catch(()=>{}).finally(()=>setChecking(false));const handler=()=>{setMe(null);setWarehouse('')};window.addEventListener('session-expired',handler);return()=>window.removeEventListener('session-expired',handler)},[]);
- async function refreshCatalog(){if(!warehouse)return;const [locations,skus,uoms,users]=await Promise.all(['locations','skus','uoms','users'].map(k=>api(root+'/catalog/'+k)));setCatalog({locations,skus,uoms,users});}
- async function load(){if(!warehouse)return;setLoading(true);try{const path=page==='overview'?'/stock/balances':page==='catalog'?'/catalog/'+tab:page==='inbound'?'/receipts':page==='outbound'?'/shipments':page==='counting'?'/count-sessions':page==='approval'?'/approval-tasks':page==='adjustments'?'/adjustments':page==='stock'?'/stock/'+tab:page==='reports'?`/reports?from=${encodeURIComponent(from+'T00:00:00+07:00')}&to=${encodeURIComponent(new Date(new Date(to+'T00:00:00+07:00').getTime()+86400000).toISOString())}`:'/stock/balances';setRows(await api(root+path));setError('');}catch(e){setError((e as Error).message)}finally{setLoading(false)}}
- useEffect(()=>{setDetail(null);setQuery('');if(warehouse){refreshCatalog().catch(e=>setError(e.message));load()}else setRows([])},[warehouse,page,tab,revision]);
- const update=(key:string,value:any)=>setDraft(p=>({...p,[key]:value}));
- async function run(work:()=>Promise<any>,message='Đã lưu thay đổi.'){setBusy(true);setError('');try{await work();setNotice(message);setRevision(v=>v+1);return true}catch(e){setError((e as Error).message);return false}finally{setBusy(false)}}
- async function send(path:string,p:Row){return api(root+path,p)}
- function dialog(title:string,values:Row,submit:(v:Row)=>Promise<any>){setDraft(values);setModal({title,render:()=>null,submit:async()=>{await submit(values)}})}
- // Draft values are bound to the current render, never captured in the dialog closure.
- const close=()=>{if(!busy)setModal(null)};
- async function saveModal(e:FormEvent){e.preventDefault();if(!modal)return;let ok=false;
- if(modal.title==='Sửa kho'){ok=await run(async()=>{await api(root,draft);const u=await api('/api/auth/me');setMe(u)});}
- else if(modal.title==='Tạo kho'){ok=await run(async()=>{await api('/api/v1/m01/warehouses',draft);const u=await api('/api/auth/me');setMe(u);setWarehouse(String(u.warehouses.at(-1).id))})}
- else if(modal.title==='Danh mục'){ok=await run(()=>send('/catalog/'+tab,draft))}
- else if(modal.title==='Tạo phiếu nhập'||modal.title==='Tạo phiếu xuất'){ok=await run(()=>send(page==='inbound'?'/receipts':'/shipments',draft))}
- else if(modal.title==='Tạo đợt kiểm kê'){ok=await run(()=>send('/count-sessions',draft))}
- else if(modal.title==='Ngưỡng tồn tối thiểu'){ok=await run(()=>send('/thresholds',draft))}
- else if(modal.title==='Quy đổi đơn vị'){ok=await run(()=>send('/catalog/conversions',draft))}
- else if(modal.title==='Nhập vị trí từ Excel'){ok=await run(async()=>{if(draft.preview){await send(`/location-imports/${draft.preview.id}/commit`,{});}else throw new Error('Cần xem trước tệp hợp lệ.');})}
- else {const {path,...body}=draft;ok=await run(()=>send(path,body))}
- if(ok){setModal(null);setDetail(null)}}
- function command(title:string,path:string,data:Row={}){dialog(title,{path,...data},async()=>{})}
- function lineChange(index:number,key:string,value:any){setDraft(d=>({...d,lines:d.lines.map((l:Row,i:number)=>i===index?{...l,[key]:value}:l)}))}
- function lineForm(){return <div className="lines">{(draft.lines||[]).map((l:Row,i:number)=><div className="line" key={i}><strong>Dòng {i+1}</strong><Field label="Quét / nhập mã vạch (Enter để tìm)"><input placeholder="Mã vạch hàng hóa" onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();const code=e.currentTarget.value.trim();const s=catalog.skus.find((s:Row)=>s.active&&(s.barcode===code||s.code===code));if(s){lineChange(i,'skuId',String(s.id));lineChange(i,'uomId',String(s.uom_id));setError('')}else setError('Không tìm thấy hàng hóa theo mã vừa quét.')}}}/></Field><Select label="Hàng hóa" value={l.skuId} rows={catalog.skus.filter((s:Row)=>s.active)} set={v=>{const s=catalog.skus.find((s:Row)=>String(s.id)===v);lineChange(i,'skuId',v);lineChange(i,'uomId',s?.uom_id)}}/><Select label="Đơn vị giao dịch" value={l.uomId} rows={catalog.uoms.filter((s:Row)=>s.active)} set={v=>lineChange(i,'uomId',v)}/><Input label="Số lượng" type="number" value={l.qty} set={v=>lineChange(i,'qty',v)}/>{draft.lines.length>1&&<button type="button" className="text-danger" onClick={()=>update('lines',draft.lines.filter((_:Row,n:number)=>n!==i))}>Bỏ dòng</button>}</div>)}<button type="button" className="secondary" onClick={()=>update('lines',[...draft.lines,{skuId:'',uomId:'',qty:'1'}])}>+ Thêm dòng hàng</button></div>}
- function modalBody(){const title=modal?.title;
- if(title==='Tạo kho'||title==='Sửa kho')return <><Input label="Mã kho" value={draft.code} set={v=>update('code',v)}/><Input label="Tên kho" value={draft.name} set={v=>update('name',v)}/><Input label="Mô tả / địa chỉ" value={draft.description} set={v=>update('description',v)} required={false}/>{title==='Sửa kho'&&<label className="check"><input type="checkbox" checked={draft.active} onChange={e=>update('active',e.target.checked)}/>Kho đang hoạt động</label>}</>;
- if(title==='Danh mục')return <><Input label="Mã" value={draft.code} set={v=>update('code',v)}/><Input label="Tên" value={draft.name} set={v=>update('name',v)}/>{tab==='locations'&&<><Select label="Cấp vị trí" value={draft.kind} rows={['AREA','AISLE','BIN'].map(x=>({id:x,name:{AREA:'Khu vực',AISLE:'Dãy',BIN:'Ô chứa hàng'}[x]}))} set={v=>{update('kind',v);update('parentId','')}}/>{draft.kind!=='AREA'&&<Select label="Vị trí cha" value={draft.parentId} rows={catalog.locations.filter((l:Row)=>l.active&&l.kind===(draft.kind==='AISLE'?'AREA':'AISLE'))} set={v=>update('parentId',v)}/>}</>}{tab==='skus'&&<><Input label="Mã vạch" value={draft.barcode} set={v=>update('barcode',v)} required={false}/><Select label="Đơn vị cơ sở" value={draft.uomId} rows={catalog.uoms.filter((u:Row)=>u.active)} set={v=>update('uomId',v)}/></>}{tab==='uoms'&&<Input label="Ký hiệu" value={draft.symbol} set={v=>update('symbol',v)}/>}</>;
- if(title==='Sửa phiếu')return <><Input label="Loại nguồn" value={draft.sourceType} set={v=>update('sourceType',v)}/><Input label="Số nguồn" value={draft.sourceRef} set={v=>update('sourceRef',v)}/>{draft.lines.map((l:Row,i:number)=><Input key={i} label={'Dòng '+l.lineNo+' · lượng theo đơn vị giao dịch'} type="number" value={l.qty} set={v=>lineChange(i,'qty',v)}/>)}</>;
- if(title==='Tạo phiếu nhập'||title==='Tạo phiếu xuất')return <><div className="form-grid"><Input label="Loại chứng từ nguồn" value={draft.sourceType} set={v=>update('sourceType',v)}/><Input label="Số chứng từ nguồn" value={draft.sourceRef} set={v=>update('sourceRef',v)}/></div>{lineForm()}</>;
- if(title==='Tạo đợt kiểm kê')return <><p className="muted">Chọn các cặp vị trí và hàng hóa thuộc phạm vi đợt. Mốc T0 được chụp khi mở đợt.</p>{draft.items.map((r:Row,i:number)=><div className="line" key={i}><Select label="Ô chứa hàng" value={r.locationId} rows={catalog.locations.filter((l:Row)=>l.kind==='BIN'&&l.active)} set={v=>update('items',draft.items.map((x:Row,n:number)=>n===i?{...x,locationId:v}:x))}/><Select label="Hàng hóa" value={r.skuId} rows={catalog.skus.filter((l:Row)=>l.active)} set={v=>update('items',draft.items.map((x:Row,n:number)=>n===i?{...x,skuId:v}:x))}/></div>)}<button type="button" className="secondary" onClick={()=>update('items',[...draft.items,{locationId:'',skuId:''}])}>+ Thêm phạm vi</button></>;
- if(title==='Ngưỡng tồn tối thiểu')return <><Select label="Hàng hóa" value={draft.skuId} rows={catalog.skus} set={v=>update('skuId',v)}/><Input label="Ngưỡng (đơn vị cơ sở)" type="number" value={draft.minQty} set={v=>update('minQty',v)}/></>;
- if(title==='Quy đổi đơn vị')return <><Select label="Hàng hóa" value={draft.skuId} rows={catalog.skus} set={v=>update('skuId',v)}/><Select label="Đơn vị giao dịch" value={draft.uomId} rows={catalog.uoms} set={v=>update('uomId',v)}/><Input label="1 đơn vị giao dịch = bao nhiêu đơn vị cơ sở?" type="number" value={draft.factor} set={v=>update('factor',v)}/></>;
- if(title==='Nhập vị trí từ Excel')return <><a className="link" href={root+'/location-imports/template'}>Tải mẫu Excel</a><Field label="Tệp .xlsx"><input type="file" accept=".xlsx" onChange={async e=>{const f=e.target.files?.[0];if(!f)return;update('preview',null);const data=new FormData();data.append('file',f);await run(async()=>{const p=await api(root+'/location-imports/preview',data);update('preview',p)})}}/></Field>{draft.preview&&<><p>{draft.preview.rows.length} dòng · {draft.preview.errors.length} lỗi</p><Table rows={draft.preview.errors} columns={[["row","Dòng"],["message","Nội dung lỗi"]]}/></>}</>;
- if(title==='Kiểm nhận')return <><p className="muted">Nhập số lượng theo đơn vị cơ sở. Mỗi dòng phải có ô nhận hàng.</p>{draft.lines.map((l:Row,i:number)=><div className="line" key={i}><strong>Dòng {l.lineNo} · {l.skuLabel}</strong><Select label="Ô nhận hàng" value={l.locationId} rows={catalog.locations.filter((l:Row)=>l.kind==='BIN'&&l.active)} set={v=>lineChange(i,'locationId',v)}/><Input label="Thực nhận" type="number" value={l.receivedQty} set={v=>lineChange(i,'receivedQty',v)}/><Input label="Phần không được phép xuất" type="number" value={l.blockedQty} set={v=>lineChange(i,'blockedQty',v)}/></div>)}</>;
- if(title==='Phân bổ giữ hàng')return <><p className="muted">Phân bổ đủ lượng yêu cầu mỗi dòng. Có thể thêm nhiều vị trí cho cùng một dòng.</p>{draft.allocations.map((a:Row,i:number)=><div className="line" key={i}><Select label="Dòng xuất" value={a.lineNo} rows={draft.sourceLines} idKey="line_no" labelKey="sku_code" set={v=>update('allocations',draft.allocations.map((x:Row,n:number)=>n===i?{...x,lineNo:v}:x))}/><Select label="Vị trí" value={a.locationId} rows={catalog.locations.filter((l:Row)=>l.kind==='BIN'&&l.active)} set={v=>update('allocations',draft.allocations.map((x:Row,n:number)=>n===i?{...x,locationId:v}:x))}/><Input label="Lượng giữ (đơn vị cơ sở)" type="number" value={a.qty} set={v=>update('allocations',draft.allocations.map((x:Row,n:number)=>n===i?{...x,qty:v}:x))}/>{draft.allocations.length>1&&<button className="secondary" type="button" onClick={()=>update('allocations',draft.allocations.filter((_:Row,n:number)=>n!==i))}>Bỏ phân bổ</button>}</div>)}<button className="secondary" type="button" onClick={()=>update('allocations',[...draft.allocations,{lineNo:'',locationId:'',qty:''}])}>+ Thêm phân bổ</button><label className="check"><input type="checkbox" checked={!!draft.returnedPicked} onChange={e=>update('returnedPicked',e.target.checked)}/>Đã hoàn trả hàng soạn bị ảnh hưởng (nếu có)</label></>;
- if(title==='Ghi số lượng soạn')return <>{draft.picks.map((p:Row,i:number)=><div className="line" key={i}><strong>Phân bổ #{p.reservationId} · tối đa {p.max}</strong><Input label="Quét / nhập mã hàng hoặc mã vạch" value={p.scanCode} set={v=>update('picks',draft.picks.map((x:Row,n:number)=>n===i?{...x,scanCode:v}:x))}/><Input label="Quét / nhập mã vị trí" value={p.locationCode} set={v=>update('picks',draft.picks.map((x:Row,n:number)=>n===i?{...x,locationCode:v}:x))}/><Input label="Số lượng đã soạn" type="number" value={p.qty} set={v=>update('picks',draft.picks.map((x:Row,n:number)=>n===i?{...x,qty:v}:x))}/></div>)}</>;
- if(title==='Phân công')return <Select label="Nhân viên đếm" value={draft.username} rows={catalog.users.filter((u:Row)=>u.role==='ACT03')} idKey="username" labelKey="username" set={v=>update('username',v)}/>;
- if(title==='Ghi kết quả đếm')return <Input label="Số thực tế (đơn vị cơ sở)" type="number" value={draft.qty} set={v=>update('qty',v)}/>;
- if(title==='Bàn giao')return <><Input label="Người nhận" value={draft.receiverName} set={v=>update('receiverName',v)}/><Input label="Số tham chiếu bàn giao" value={draft.sourceRef} set={v=>update('sourceRef',v)} required={false}/></>;
- if(title==='Đề nghị sửa nhập')return <><Input label="Lý do" value={draft.reason} set={v=>update('reason',v)}/>{draft.lines.map((l:Row,i:number)=><div className="line" key={i}><strong>Dòng {l.lineNo}</strong><Input label="Chênh lệch tồn (+ tăng / − giảm)" value={l.deltaBook} set={v=>lineChange(i,'deltaBook',v)}/><Input label="Chênh lệch lượng bị chặn" value={l.deltaBlocked} set={v=>lineChange(i,'deltaBlocked',v)}/></div>)}<p className="muted">Chỉ gửi những dòng có thay đổi. Hồ sơ chờ duyệt không đổi tồn.</p></>;
- return <><p className="muted">{title==='Duyệt hồ sơ'?'Chấp thuận hồ sơ theo đúng phiên bản đang xem.':'Xác nhận thao tác với hồ sơ đang chọn.'}</p>{'reason'in draft&&<Field label="Chứng cứ (PDF / PNG / JPEG, tối đa 5 MB)"><input type="file" accept="application/pdf,image/png,image/jpeg" onChange={async e=>{const f=e.target.files?.[0];if(!f)return;const data=new FormData();data.append('file',f);await run(async()=>{const saved=await api(root+'/evidence',data);update('evidenceIds',[...(draft.evidenceIds||[]),saved.id])})}}/>{draft.evidenceIds?.length>0&&<small>Đã đính kèm {draft.evidenceIds.length} tệp.</small>}</Field>}{'reason'in draft&&<Input label="Lý do / giải trình" value={draft.reason} set={v=>update('reason',v)}/ >}{'resolution'in draft&&<Input label="Biện pháp xử lý" value={draft.resolution} set={v=>update('resolution',v)}/ >}{'note'in draft&&<Input label="Nhận xét" value={draft.note} set={v=>update('note',v)} required={false}/ >}{'returnedPicked'in draft&&<label className="check"><input type="checkbox" checked={draft.returnedPicked} onChange={e=>update('returnedPicked',e.target.checked)}/>Đã hoàn trả toàn bộ hàng đã soạn (nếu có)</label>}</>;
- }
- async function openRow(r:Row){
-  if(busy)return;
-  if(page==='inbound'||page==='outbound'||page==='counting'){
-   setBusy(true);setError('');
-   try{
-    const path=page==='inbound'?'/receipts/':page==='outbound'?'/shipments/':'/count-sessions/';
-    const record=await api(root+path+r.id);
-    setDetail(record);
-   }catch(e){setError((e as Error).message);}
-   finally{setBusy(false);}
-  }else setDetail(r);
- }
- const filtered=rows.filter(r=>JSON.stringify(r).toLocaleLowerCase().includes(query.toLocaleLowerCase()));
- function actionButton(label:string,action:string,extra:Row={},title=label){const type=page==='inbound'?'receipts':page==='outbound'?'shipments':'count-sessions';return <button className="secondary" onClick={()=>command(title,`/${type}/${detail!.id}/${action}`,{version:detail!.version,...extra})}>{label}</button>}
- function detailPanel(){if(!detail)return null;return <aside className="detail"><div className="section-head"><div><p className="eyebrow">CHI TIẾT HỒ SƠ</p><h2>{detail.code||'#'+detail.id}</h2></div><button className="icon-btn" onClick={()=>setDetail(null)} aria-label="Đóng chi tiết">×</button></div><div className="detail-meta"><Badge value={detail.status}/>{detail.version!==undefined&&<span>Phiên bản {detail.version}</span>}<span>{detail.source_ref||''}</span></div>
- {detail.lines&&<Table rows={detail.lines} columns={[["line_no","Dòng"],["sku_code","SKU"],[page==='inbound'?'expected_qty':'requested_qty','Số lượng cơ sở'],["received_qty","Thực nhận"],["location_id","Vị trí"]]}/>}
- {detail.reservations&&<><h3>Phân bổ giữ hàng</h3><Table rows={detail.reservations} columns={[["id","ID"],["line_no","Dòng"],["location_id","Vị trí"],["qty_held","Giữ"],["qty_picked","Soạn"],["status","Trạng thái"]]}/></>}
- <div className="actions">
- {['inbound','outbound'].includes(page)&&isStaff&&['DRAFT','RETURNED'].includes(detail.status)&&actionButton('Sửa phiếu','update',{sourceType:detail.source_type,sourceRef:detail.source_ref,lines:detail.lines.map((l:Row)=>({lineNo:l.line_no,qty:l.entered_qty}))})}
- {page==='inbound'&&<>{isStaff&&['DRAFT','RETURNED'].includes(detail.status)&&actionButton('Gửi kiểm nhận','submit')}{isStaff&&['RECEIVING','DISCREPANCY'].includes(detail.status)&&actionButton('Kiểm nhận','receive',{lines:detail.lines.map((l:Row)=>({lineNo:l.line_no,skuLabel:l.sku_code,locationId:l.location_id||'',receivedQty:l.received_qty??l.expected_qty,blockedQty:l.blocked_qty||'0'}))})}{isStaff&&detail.status==='DISCREPANCY'&&actionButton('Trình sai lệch','discrepancy',{reason:''})}{isStaff&&detail.status==='READY'&&actionButton('Chốt nhập kho','confirm')}{['ACT02','ACT03'].includes(role)&&!['POSTED','CANCELLED'].includes(detail.status)&&actionButton('Hủy phiếu','cancel',{reason:''})}{['ACT02','ACT03'].includes(role)&&detail.status==='POSTED'&&actionButton('Đề nghị đảo nhập','corrections',{reason:'',reverse:true})}{['ACT02','ACT03'].includes(role)&&detail.status==='POSTED'&&actionButton('Đề nghị sửa nhập','corrections',{reason:'',lines:detail.lines.map((l:Row)=>({lineNo:l.line_no,deltaBook:'0',deltaBlocked:'0'}))})}</>}
- {page==='outbound'&&<>{['ACT02','ACT03'].includes(role)&&['DRAFT','RETURNED','ISSUE'].includes(detail.status)&&actionButton('Phân bổ giữ hàng',detail.status==='ISSUE'?'reallocate':'reserve',{allocations:detail.lines.map((l:Row)=>({lineNo:l.line_no,locationId:'',qty:l.requested_qty})),sourceLines:detail.lines,returnedPicked:false})}{isStaff&&['READY','PICKING'].includes(detail.status)&&actionButton('Ghi số lượng soạn','pick',{picks:detail.reservations.filter((h:Row)=>h.status==='ACTIVE').map((h:Row)=>({reservationId:h.id,qty:h.qty_picked,max:h.qty_held}))})}{isStaff&&['READY','PICKING','PICKED'].includes(detail.status)&&actionButton('Báo thiếu / sai','issues',{reason:''})}{isStaff&&detail.status==='PICKED'&&actionButton('Bàn giao','confirm',{receiverName:'',sourceRef:''})}{['ACT02','ACT03'].includes(role)&&!['POSTED','CANCELLED'].includes(detail.status)&&actionButton('Hủy phiếu','cancel',{reason:'',returnedPicked:false})}{detail.status==='POSTED'&&<a className="button secondary" href={`${root}/minutes/handover/${detail.id}/pdf`}>Tải biên bản PDF</a>}</>}
- {page==='counting'&&<>{isManager&&detail.status==='DRAFT'&&actionButton('Mở đợt','open')}{isManager&&detail.status==='OPEN'&&actionButton('Khóa biên bản','close',{note:''})}{detail.status==='CLOSED'&&['ACT02','ACT09'].includes(role)&&<a className="button secondary" href={`${root}/minutes/count/${detail.id}/pdf`}>Tải biên bản PDF</a>}</>}
- {page==='catalog'&&isManager&&<><button className="secondary" onClick={()=>dialog('Danh mục',{...detail,uomId:detail.uom_id,parentId:detail.parent_id},async()=>{})}>Sửa thông tin</button><button className="secondary" onClick={()=>run(()=>send('/catalog/'+tab,{...detail,uomId:detail.uom_id,parentId:detail.parent_id,active:!detail.active})).then(ok=>{if(ok)setDetail(null)})}>{detail.active?'Ngừng sử dụng':'Kích hoạt'}</button></>}
- {page==='stock'&&tab==='alerts'&&isManager&&detail.status!=='RESOLVED'&&<button className="secondary" onClick={()=>command('Tiếp nhận cảnh báo',`/alerts/${detail.id}/handle`,{version:detail.version,resolution:''})}>Tiếp nhận xử lý</button>}
- {page==='approval'&&detail.status==='PENDING'&&<>{[true,false].map(accept=>{const type=detail.receipt_id?'receipts':detail.shipment_id?'shipments':'adjustments';const id=detail.receipt_id||detail.shipment_id||detail.adjustment_id;return <button key={String(accept)} className={accept?'primary':'secondary'} onClick={()=>command(accept?'Duyệt hồ sơ':'Từ chối hồ sơ',`/${type}/${id}/decision`,{version:detail.target_version,accept,...(!accept?{reason:''}:{})})}>{accept?'Chấp thuận':'Từ chối'}</button>})}</>}
- </div>
- {page==='approval'&&<ApprovalContent approval={detail} catalog={catalog}/>}
- {page==='counting'&&detail.items?.map((i:Row)=><div className="count-card" key={i.id}><div className="section-head"><strong>{i.location_code} / {i.sku_code}</strong><Badge value={i.status}/></div><p>Người đếm: {i.assigned_to||'Chưa giao'} · Sổ T0: {num(i.book_at_t0)} · Đếm: {i.counted_qty??'—'} · Delta: {i.delta??'—'}</p><div className="actions">{[...(isManager&&['WAITING','ASSIGNED'].includes(i.status)?[['Phân công','assign',{username:''}]]:[]),...(isStaff&&['ASSIGNED','RECOUNT'].includes(i.status)?[['Bắt đầu đếm','start',{}]]:[]),...(isStaff&&i.status==='COUNTING'?[['Ghi kết quả đếm','record',{qty:''}]]:[]),...(['ACT02','ACT03'].includes(role)&&i.status==='COUNTED'?[['Đối chiếu','reconcile',{}]]:[]),...(isStaff&&i.status==='VARIANCE'?[['Lập đề nghị','request-adjustment',{reason:''}]]:[]),...(isManager&&['COUNTING','COUNTED','VARIANCE','PENDING','MATCHED'].includes(i.status)?[['Yêu cầu đếm lại','recount',{reason:''}]]:[])].map(([label,action,extra]:any)=><button key={action} className="secondary" onClick={()=>command(label,`/count-items/${i.id}/${action}`,{version:i.version,...extra})}>{label}</button>)}</div></div>)}
- {!detail.lines&&!detail.items&&page!=='approval'&&<dl>{Object.entries(detail).filter(([,v])=>typeof v!=='object').map(([k,v])=><div key={k}><dt>{k}</dt><dd>{fmt(v)}</dd></div>)}</dl>}
- </aside>}
- if(checking)return <div className="loading-screen">Đang kết nối SLMS…</div>;
- if(!me)return <main className="login"><section className="login-story"><div className="brand">▦ <span>SLMS<span className="brand-light"> / M01</span></span></div><div><p className="eyebrow">QUẢN LÝ KHO VÀ TỒN KHO</p><h1>Mọi chuyển động.<br/>Một nguồn dữ liệu.</h1><p>Quản lý nhập, xuất và kiểm kê trên cùng một hệ thống. Theo dõi số dư và truy vết đến từng giao dịch.</p><div className="story-stats"><span>05 <small>Phân hệ nghiệp vụ</small></span><span>32 <small>Use case</small></span></div></div><small>SLMS · Nhóm 03 / PTIT</small></section><section className="login-form"><form onSubmit={async e=>{e.preventDefault();await run(async()=>{await login(username,password);const u=await api('/api/auth/me');setMe(u);setWarehouse(String(u.warehouses[0]?.id||''))},'')}}><p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p><h2>Đăng nhập hệ thống</h2><p className="muted">Sử dụng tài khoản được cấp để tiếp tục.</p>{error&&<div role="alert" className="error">{error}</div>}<Input label="Tên đăng nhập" value={username} set={setUsername}/><Input label="Mật khẩu" type="password" value={password} set={setPassword}/><button className="primary full" disabled={busy}>{busy?'Đang đăng nhập…':'Đăng nhập →'}</button><p className="footnote">Vai trò và phạm vi kho được kiểm tra tại máy chủ.</p></form></section></main>;
- const titles:Record<string,string>={overview:'Tổng quan kho',catalog:'Danh mục',inbound:'Nhập kho',outbound:'Xuất kho',stock:'Tồn kho & cảnh báo',counting:'Kiểm kê',approval:'Phê duyệt',adjustments:'Hồ sơ điều chỉnh',reports:'Báo cáo nhập · xuất · tồn'};
- const nav=[['overview','◫','Tổng quan'],['catalog','▦','Danh mục'],['inbound','↙','Nhập kho'],['outbound','↗','Xuất kho'],['stock','▤','Tồn kho'],['counting','✓','Kiểm kê'],['approval','◇','Phê duyệt'],['adjustments','⇄','Điều chỉnh'],['reports','▥','Báo cáo']].filter(([k])=>!isStaff||!['reports','approval'].includes(k));
- const columns:[string,string][]=page==='catalog'?tab==='locations'?[["code","Mã vị trí"],["name","Tên vị trí"],["kind","Cấp"],["parent_id","ID cha"],["active","Trạng thái"]]:tab==='skus'?[["code","SKU"],["name","Tên hàng"],["barcode","Mã vạch"],["symbol","Đơn vị"],["active","Trạng thái"]]:[["code","Mã đơn vị"],["name","Tên đơn vị"],["symbol","Ký hiệu"],["active","Trạng thái"]]:page==='inbound'||page==='outbound'?[["code","Mã phiếu"],["source_ref","Chứng từ nguồn"],["status","Trạng thái"],["created_by","Người lập"],["created_at","Ngày lập"]]:page==='counting'?[["code","Đợt kiểm kê"],["status","Trạng thái"],["owner_id","Phụ trách"],["opened_at","Mốc T0"]]:page==='approval'?[["id","Hồ sơ"],["receipt_id","Phiếu nhập"],["shipment_id","Phiếu xuất"],["adjustment_id","Điều chỉnh"],["level_code","Cấp duyệt"],["status","Trạng thái"]]:page==='adjustments'?[["id","Mã hồ sơ"],["kind","Loại"],["reason","Lý do"],["status","Trạng thái"],["created_by","Người lập"]]:page==='stock'&&tab==='alerts'?[["sku_code","SKU"],["sku_name","Tên hàng"],["observed_qty","Khả dụng"],["threshold_qty","Ngưỡng"],["status","Trạng thái"]]:page==='stock'&&tab==='ledger'?[["batch_id","Giao dịch"],["sku_code","SKU"],["location_code","Vị trí"],["before_book","Trước"],["delta_book","Biến động"],["after_book","Sau"],["posted_at","Thời điểm"]]:page==='reports'?[["sku_code","SKU"],["sku_name","Tên hàng"],["opening_qty","Đầu kỳ"],["inbound_qty","Nhập"],["outbound_qty","Xuất"],["adjustment_qty","Điều chỉnh"],["closing_qty","Cuối kỳ"]]:[["sku_code","SKU"],["sku_name","Tên hàng"],["location_code","Vị trí"],["book_qty","Ghi sổ"],["held_qty","Đã giữ"],["blocked_qty","Bị chặn"],["available_qty","Khả dụng"]];
- const tabs=page==='catalog'?[['locations','Vị trí kho'],['skus','Hàng hóa'],['uoms','Đơn vị tính']]:page==='stock'?[['balances','Số dư tồn'],['ledger','Thẻ kho'],['alerts','Cảnh báo']]:[];
- return <div className="app"><nav className="sidebar"><div className="brand">▦ <span>SLMS<span className="brand-light"> / M01</span></span></div><p className="nav-label">VẬN HÀNH KHO</p>{nav.map(([key,icon,label])=><button key={key} className={'nav-item '+(page===key?'active':'')} onClick={()=>{setPage(key);if(key==='catalog')setTab('locations');if(key==='stock')setTab('balances')}}><span>{icon}</span>{label}</button>)}<div className="sidebar-bottom"><div className="avatar">{me.username.slice(0,1).toUpperCase()}</div><div><strong>{me.username}</strong><small>{role==='ACT02'?'Quản lý kho':role==='ACT03'?'Nhân viên kho':'Lãnh đạo'}</small></div><button className="icon-btn" onClick={()=>run(async()=>{await logout();setMe(null);setWarehouse('')},'')} title="Đăng xuất">↪</button></div></nav><div className="workspace"><header className="topbar"><span>Không gian làm việc <b>/ {titles[page]}</b></span><div className="warehouse-select"><span>Kho đang làm việc</span><select value={warehouse} onChange={e=>{setWarehouse(e.target.value);setModal(null)}}>{me.warehouses.map((w:Row)=><option value={w.id} key={w.id}>{w.code} · {w.name}</option>)}</select>{isManager&&warehouse&&<button className="icon-btn" title="Thông tin kho" onClick={()=>dialog('Sửa kho',{...me.warehouses.find((w:Row)=>String(w.id)===warehouse)},async()=>{})}>⚙</button>}{isManager&&<button className="icon-btn" title="Tạo kho" onClick={()=>dialog('Tạo kho',{code:'',name:'',description:''},async()=>{})}>＋</button>}</div></header><main className="main"><div className="section-head"><div><p className="eyebrow">SLMS / QUẢN LÝ KHO VÀ TỒN KHO</p><h1>{titles[page]}</h1><p className="muted">{page==='overview'?'Theo dõi số liệu vận hành từ sổ giao dịch của kho.':'Dữ liệu được giới hạn theo vai trò và kho đang làm việc.'}</p></div><div className="actions"><button className="secondary" disabled={loading||busy} onClick={()=>{load();refreshCatalog()}}>↻ Làm mới</button>{warehouse&&isManager&&page==='catalog'&&<button className="primary" onClick={()=>dialog('Danh mục',{code:'',name:'',kind:'AREA',symbol:'',barcode:'',uomId:''},async()=>{})}>+ Thêm mới</button>}{warehouse&&isStaff&&['inbound','outbound'].includes(page)&&<button className="primary" onClick={()=>dialog(page==='inbound'?'Tạo phiếu nhập':'Tạo phiếu xuất',{sourceType:'MANUAL',sourceRef:'',lines:[{skuId:'',uomId:'',qty:'1'}]},async()=>{})}>+ Tạo phiếu</button>}{warehouse&&isManager&&page==='counting'&&<button className="primary" onClick={()=>dialog('Tạo đợt kiểm kê',{items:[{locationId:'',skuId:''}]},async()=>{})}>+ Tạo đợt kiểm kê</button>}</div></div>
- {error&&<div className="error" role="alert">{error}<button onClick={()=>setError('')}>×</button></div>}{notice&&<div className="notice" role="status">{notice}<button onClick={()=>setNotice('')}>×</button></div>}
- {!warehouse?<section className="card empty"><h2>Bắt đầu với kho đầu tiên</h2><p>Tạo kho, đơn vị tính, hàng hóa và vị trí trước khi lập phiếu.</p>{isManager?<button className="primary" onClick={()=>dialog('Tạo kho',{code:'',name:'',description:''},async()=>{})}>+ Tạo kho</button>:<p>Đề nghị quản lý tạo kho và cấp quyền truy cập.</p>}</section>:<>
- {page==='overview'&&<div className="metrics">{[['SKU có số dư',new Set(rows.map(r=>r.sku_id)).size,'Trên các vị trí trong bảng'],['Vị trí có số dư',new Set(rows.map(r=>r.location_id)).size,'Tối đa 200 cặp đang hiển thị'],['Cặp đang giữ',rows.filter(r=>Number(r.held_qty)>0).length,'Giữ cho các phiếu xuất'],['Cặp có hàng bị chặn',rows.filter(r=>Number(r.blocked_qty)>0).length,'Không được phép xuất']].map(([label,value,sub])=><section className="metric" key={String(label)}><p>{label}</p><strong>{value}</strong><small>{sub}</small></section>)}</div>}
- <section className="card">{tabs.length>0&&<div className="tabs">{tabs.map(([key,label])=><button key={key} className={tab===key?'selected':''} onClick={()=>setTab(key)}>{label}</button>)}</div>}<div className="toolbar"><input className="search" placeholder="Tìm trong danh sách đang hiển thị…" value={query} onChange={e=>setQuery(e.target.value)}/><span className="muted">{filtered.length} bản ghi</span>{page==='catalog'&&tab==='locations'&&isManager&&<button className="secondary" onClick={()=>dialog('Nhập vị trí từ Excel',{},async()=>{})}>Nhập Excel</button>}{page==='catalog'&&tab==='skus'&&isManager&&<button className="secondary" onClick={()=>dialog('Quy đổi đơn vị',{skuId:'',uomId:'',factor:'1'},async()=>{})}>Quy đổi đơn vị</button>}{page==='stock'&&isManager&&<button className="secondary" onClick={()=>dialog('Ngưỡng tồn tối thiểu',{skuId:'',minQty:'0'},async()=>{})}>Đặt ngưỡng tồn</button>}</div>
- {page==='reports'&&<div className="toolbar"><Input label="Từ ngày (giờ Việt Nam)" type="date" value={from} set={setFrom}/><Input label="Đến hết ngày" type="date" value={to} set={setTo}/><button className="secondary" onClick={load}>Xem báo cáo</button><a className="button secondary" href={`${root}/reports/export?from=${encodeURIComponent(from+'T00:00:00+07:00')}&to=${encodeURIComponent(new Date(new Date(to+'T00:00:00+07:00').getTime()+86400000).toISOString())}`}>Xuất Excel</a></div>}
- {loading?<div className="empty">Đang tải dữ liệu…</div>:<Table rows={filtered} columns={columns} onRow={page==='reports'||page==='overview'?undefined:openRow}/>}<div className="table-foot">{page==='stock'?'Tối đa 200 bản ghi mới nhất. API hỗ trợ phân trang offset/limit.':'Danh sách giới hạn 200 bản ghi. Chọn dòng để xem chi tiết và thao tác.'}</div></section></>}
- <footer>SLMS M01 <span>Kho · Nhập · Tồn · Kiểm kê · Xuất</span></footer></main></div>{detailPanel()}{modal&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><section className="modal" role="dialog" aria-modal="true" aria-label={modal.title}><div className="section-head"><h2>{modal.title==='Danh mục'?(draft.id?'Sửa ':'Thêm ')+({locations:'vị trí',skus:'hàng hóa',uoms:'đơn vị tính'}[tab]):modal.title}</h2><button type="button" className="icon-btn" onClick={close}>×</button></div><form onSubmit={saveModal}><div className="modal-body">{error&&<div className="error">{error}</div>}{modalBody()}</div><div className="modal-footer"><button type="button" className="secondary" onClick={close} disabled={busy}>Đóng</button><button className="primary" disabled={busy||(modal.title==='Nhập vị trí từ Excel'&&!draft.preview?.canCommit)}>{busy?'Đang xử lý…':'Xác nhận'}</button></div></form></section></div>}</div>;
+
+const names: Record<string, string> = {
+  DRAFT: 'Nháp',
+  RECEIVING: 'Chờ kiểm nhận',
+  DISCREPANCY: 'Có sai lệch',
+  PENDING: 'Chờ duyệt',
+  RETURNED: 'Trả bổ sung',
+  READY: 'Sẵn sàng',
+  POSTED: 'Hoàn tất',
+  CANCELLED: 'Đã hủy',
+  OPEN: 'Đang mở',
+  CLOSED: 'Đã khóa',
+  WAITING: 'Chưa phân công',
+  ASSIGNED: 'Đã phân công',
+  COUNTING: 'Đang đếm',
+  COUNTED: 'Chờ đối chiếu',
+  VARIANCE: 'Chênh lệch',
+  RECOUNT: 'Cần đếm lại',
+  MATCHED: 'Khớp',
+  ADJUSTED: 'Đã điều chỉnh',
+  PICKING: 'Đang soạn',
+  PICKED: 'Đã soạn đủ',
+  ISSUE: 'Thiếu/sai hàng',
+  ACTIVE: 'Đang giữ',
+  RELEASED: 'Đã giải phóng',
+  CONSUMED: 'Đã tiêu thụ',
+  APPROVED: 'Đã duyệt',
+  REJECTED: 'Từ chối',
+  SUPERSEDED: 'Hết hiệu lực',
+  IN_PROGRESS: 'Đang xử lý',
+  RESOLVED: 'Đã đóng',
+};
+const num = (v: unknown) =>
+  Number(v || 0).toLocaleString('vi-VN', { maximumFractionDigits: 3 });
+const fmt = (v: any) =>
+  v === null || v === undefined
+    ? '—'
+    : typeof v === 'boolean'
+      ? v
+        ? 'Đang dùng'
+        : 'Ngừng dùng'
+      : typeof v === 'object'
+        ? JSON.stringify(v)
+        : String(v);
+function Badge({ value }: { value: any }) {
+  return (
+    <span
+      className={
+        'badge ' +
+        (['POSTED', 'MATCHED', 'ADJUSTED', 'APPROVED', 'RESOLVED'].includes(
+          value,
+        )
+          ? 'green'
+          : ['CANCELLED', 'REJECTED', 'VARIANCE', 'ISSUE'].includes(value)
+            ? 'red'
+            : '')
+      }
+    >
+      {names[value] || fmt(value)}
+    </span>
+  );
+}
+
+function Table({
+  rows,
+  columns,
+  onRow,
+}: {
+  rows: Row[];
+  columns: [string, string][];
+  onRow?: (r: Row) => void;
+}) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {columns.map(([k, l]) => (
+              <th key={k}>{l}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr
+              key={r.id || i}
+              onClick={() => onRow?.(r)}
+              className={onRow ? 'clickable' : ''}
+            >
+              {columns.map(([k]) => (
+                <td key={k}>
+                  {k === 'status' ? <Badge value={r[k]} /> : fmt(r[k])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!rows.length && (
+        <div className="empty">
+          <span>▦</span>
+          <h3>Chưa có dữ liệu</h3>
+          <p>Tạo bản ghi đầu tiên hoặc thay đổi điều kiện tra cứu.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Input({
+  label,
+  value,
+  set,
+  type = 'text',
+  required = true,
+}: {
+  label: string;
+  value: any;
+  set: (v: string) => void;
+  type?: string;
+  required?: boolean;
+}) {
+  return (
+    <Field label={label}>
+      <input
+        type={type}
+        value={value ?? ''}
+        onChange={(e) => set(e.target.value)}
+        required={required}
+        step={type === 'number' ? '0.001' : undefined}
+        min={type === 'number' ? '0' : undefined}
+      />
+    </Field>
+  );
+}
+
+function Select({
+  label,
+  value,
+  set,
+  rows,
+  labelKey = 'name',
+  idKey = 'id',
+  optional = false,
+}: {
+  label: string;
+  value: any;
+  set: (v: string) => void;
+  rows: Row[];
+  labelKey?: string;
+  idKey?: string;
+  optional?: boolean;
+}) {
+  return (
+    <Field label={label}>
+      <select
+        value={value ?? ''}
+        onChange={(e) => set(e.target.value)}
+        required={!optional}
+      >
+        <option value="">Chọn…</option>
+        {rows.map((r) => (
+          <option value={r[idKey]} key={r[idKey]}>
+            {r.code ? r.code + ' · ' : ''}
+            {r[labelKey]}
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+type Dialog = {
+  title: string;
+  render: () => ReactNode;
+  submit: () => Promise<void>;
+};
+export default function App() {
+  const [me, setMe] = useState<Row | null>(null),
+    [checking, setChecking] = useState(true),
+    [warehouse, setWarehouse] = useState(''),
+    [page, setPage] = useState('overview'),
+    [tab, setTab] = useState('locations'),
+    [rows, setRows] = useState<Row[]>([]),
+    [catalog, setCatalog] = useState<Row>({
+      locations: [],
+      skus: [],
+      uoms: [],
+      users: [],
+    }),
+    [detail, setDetail] = useState<Row | null>(null),
+    [query, setQuery] = useState(''),
+    [error, setError] = useState(''),
+    [notice, setNotice] = useState(''),
+    [busy, setBusy] = useState(false),
+    [loading, setLoading] = useState(false),
+    [modal, setModal] = useState<Dialog | null>(null),
+    [draft, setDraft] = useState<Row>({}),
+    [revision, setRevision] = useState(0),
+    [username, setUsername] = useState(''),
+    [password, setPassword] = useState(''),
+    [from, setFrom] = useState(
+      new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+        .toISOString()
+        .slice(0, 10),
+    ),
+    [to, setTo] = useState(new Date().toISOString().slice(0, 10));
+  const root = `/api/v1/m01/warehouses/${warehouse}`;
+  const role = me?.role;
+  const isManager = role === 'ACT02';
+  const isStaff = role === 'ACT03';
+  useEffect(() => {
+    api('/api/auth/me')
+      .then((u) => {
+        setMe(u);
+        setWarehouse(String(u.warehouses[0]?.id || ''));
+      })
+      .catch(() => {})
+      .finally(() => setChecking(false));
+    const handler = () => {
+      setMe(null);
+      setWarehouse('');
+    };
+    window.addEventListener('session-expired', handler);
+    return () => window.removeEventListener('session-expired', handler);
+  }, []);
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-11
+   * Use case: UC-CAT-002, UC-CAT-004
+   *
+   * Nạp đồng thời danh mục vị trí, hàng hóa, đơn vị và người dùng.
+   * Chỉ nạp khi đã chọn kho; danh mục được dùng cho các biểu mẫu trong kho hiện tại.
+   */
+  async function refreshCatalog() {
+    if (!warehouse) return;
+    const [locations, skus, uoms, users] = await Promise.all(
+      ['locations', 'skus', 'uoms', 'users'].map((k) =>
+        api(root + '/catalog/' + k),
+      ),
+    );
+    setCatalog({ locations, skus, uoms, users });
+  }
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-12
+   * Use case: UC-IN-008, UC-OUT-001, UC-CNT-001, UC-STK-001, UC-STK-002, UC-STK-004
+   *
+   * Nạp dữ liệu màn hình theo kho, phân hệ và thẻ đang chọn.
+   * Báo cáo gửi ngày theo múi giờ +07:00 và mốc kết thúc là đầu ngày kế tiếp để bao gồm ngày chọn.
+   */
+  async function load() {
+    if (!warehouse) return;
+    setLoading(true);
+    try {
+      const path =
+        page === 'overview'
+          ? '/stock/balances'
+          : page === 'catalog'
+            ? '/catalog/' + tab
+            : page === 'inbound'
+              ? '/receipts'
+              : page === 'outbound'
+                ? '/shipments'
+                : page === 'counting'
+                  ? '/count-sessions'
+                  : page === 'approval'
+                    ? '/approval-tasks'
+                    : page === 'adjustments'
+                      ? '/adjustments'
+                      : page === 'stock'
+                        ? '/stock/' + tab
+                        : page === 'reports'
+                          ? `/reports?from=${encodeURIComponent(from + 'T00:00:00+07:00')}&to=${encodeURIComponent(new Date(new Date(to + 'T00:00:00+07:00').getTime() + 86400000).toISOString())}`
+                          : '/stock/balances';
+      setRows(await api(root + path));
+      setError('');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => {
+    setDetail(null);
+    setQuery('');
+    if (warehouse) {
+      refreshCatalog().catch((e) => setError(e.message));
+      load();
+    } else setRows([]);
+  }, [warehouse, page, tab, revision]);
+  const update = (key: string, value: any) =>
+    setDraft((p) => ({ ...p, [key]: value }));
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-13
+   * Use case: Dùng chung cho các lệnh nghiệp vụ M01
+   *
+   * Bao trạng thái đang xử lý, thông báo thành công và lỗi cho một thao tác.
+   * Chỉ tăng revision để tải lại dữ liệu khi thao tác thành công; luôn kết thúc trạng thái busy.
+   */
+  async function run(work: () => Promise<any>, message = 'Đã lưu thay đổi.') {
+    setBusy(true);
+    setError('');
+    try {
+      await work();
+      setNotice(message);
+      setRevision((v) => v + 1);
+      return true;
+    } catch (e) {
+      setError((e as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function send(path: string, p: Row) {
+    return api(root + path, p);
+  }
+  function dialog(
+    title: string,
+    values: Row,
+    submit: (v: Row) => Promise<any>,
+  ) {
+    setDraft(values);
+    setModal({
+      title,
+      render: () => null,
+      submit: async () => {
+        await submit(values);
+      },
+    });
+  }
+  const close = () => {
+    if (!busy) setModal(null);
+  };
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-14
+   * Use case: UC-CAT-001, UC-CAT-002, UC-CAT-003, UC-CAT-004, UC-IN-001, UC-OUT-001, UC-CNT-001,
+   * UC-STK-003
+   *
+   * Gửi dữ liệu hiện tại của biểu mẫu tới thao tác nghiệp vụ tương ứng.
+   * Đọc draft của lần render hiện tại; chỉ đóng biểu mẫu và bỏ chi tiết sau khi lưu thành công.
+   * Nhập Excel cần bản xem trước hợp lệ.
+   */
+  async function saveModal(e: FormEvent) {
+    e.preventDefault();
+    if (!modal) return;
+    let ok = false;
+    if (modal.title === 'Sửa kho') {
+      ok = await run(async () => {
+        await api(root, draft);
+        const u = await api('/api/auth/me');
+        setMe(u);
+      });
+    } else if (modal.title === 'Tạo kho') {
+      ok = await run(async () => {
+        await api('/api/v1/m01/warehouses', draft);
+        const u = await api('/api/auth/me');
+        setMe(u);
+        setWarehouse(String(u.warehouses.at(-1).id));
+      });
+    } else if (modal.title === 'Danh mục') {
+      ok = await run(() => send('/catalog/' + tab, draft));
+    } else if (
+      modal.title === 'Tạo phiếu nhập' ||
+      modal.title === 'Tạo phiếu xuất'
+    ) {
+      ok = await run(() =>
+        send(page === 'inbound' ? '/receipts' : '/shipments', draft),
+      );
+    } else if (modal.title === 'Tạo đợt kiểm kê') {
+      ok = await run(() => send('/count-sessions', draft));
+    } else if (modal.title === 'Ngưỡng tồn tối thiểu') {
+      ok = await run(() => send('/thresholds', draft));
+    } else if (modal.title === 'Quy đổi đơn vị') {
+      ok = await run(() => send('/catalog/conversions', draft));
+    } else if (modal.title === 'Nhập vị trí từ Excel') {
+      ok = await run(async () => {
+        if (draft.preview) {
+          await send(`/location-imports/${draft.preview.id}/commit`, {});
+        } else throw new Error('Cần xem trước tệp hợp lệ.');
+      });
+    } else {
+      const { path, ...body } = draft;
+      ok = await run(() => send(path, body));
+    }
+    if (ok) {
+      setModal(null);
+      setDetail(null);
+    }
+  }
+  function command(title: string, path: string, data: Row = {}) {
+    dialog(title, { path, ...data }, async () => {});
+  }
+  function lineChange(index: number, key: string, value: any) {
+    setDraft((d) => ({
+      ...d,
+      lines: d.lines.map((l: Row, i: number) =>
+        i === index ? { ...l, [key]: value } : l,
+      ),
+    }));
+  }
+  function lineForm() {
+    return (
+      <div className="lines">
+        {(draft.lines || []).map((l: Row, i: number) => (
+          <div className="line" key={i}>
+            <strong>Dòng {i + 1}</strong>
+            <Field label="Quét / nhập mã vạch (Enter để tìm)">
+              <input
+                placeholder="Mã vạch hàng hóa"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const code = e.currentTarget.value.trim();
+                    const s = catalog.skus.find(
+                      (s: Row) =>
+                        s.active && (s.barcode === code || s.code === code),
+                    );
+                    if (s) {
+                      lineChange(i, 'skuId', String(s.id));
+                      lineChange(i, 'uomId', String(s.uom_id));
+                      setError('');
+                    } else
+                      setError('Không tìm thấy hàng hóa theo mã vừa quét.');
+                  }
+                }}
+              />
+            </Field>
+            <Select
+              label="Hàng hóa"
+              value={l.skuId}
+              rows={catalog.skus.filter((s: Row) => s.active)}
+              set={(v) => {
+                const s = catalog.skus.find((s: Row) => String(s.id) === v);
+                lineChange(i, 'skuId', v);
+                lineChange(i, 'uomId', s?.uom_id);
+              }}
+            />
+            <Select
+              label="Đơn vị giao dịch"
+              value={l.uomId}
+              rows={catalog.uoms.filter((s: Row) => s.active)}
+              set={(v) => lineChange(i, 'uomId', v)}
+            />
+            <Input
+              label="Số lượng"
+              type="number"
+              value={l.qty}
+              set={(v) => lineChange(i, 'qty', v)}
+            />
+            {draft.lines.length > 1 && (
+              <button
+                type="button"
+                className="text-danger"
+                onClick={() =>
+                  update(
+                    'lines',
+                    draft.lines.filter((_: Row, n: number) => n !== i),
+                  )
+                }
+              >
+                Bỏ dòng
+              </button>
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          className="secondary"
+          onClick={() =>
+            update('lines', [
+              ...draft.lines,
+              { skuId: '', uomId: '', qty: '1' },
+            ])
+          }
+        >
+          + Thêm dòng hàng
+        </button>
+      </div>
+    );
+  }
+  function modalBody() {
+    const title = modal?.title;
+    if (title === 'Tạo kho' || title === 'Sửa kho')
+      return (
+        <>
+          <Input
+            label="Mã kho"
+            value={draft.code}
+            set={(v) => update('code', v)}
+          />
+          <Input
+            label="Tên kho"
+            value={draft.name}
+            set={(v) => update('name', v)}
+          />
+          <Input
+            label="Mô tả / địa chỉ"
+            value={draft.description}
+            set={(v) => update('description', v)}
+            required={false}
+          />
+          {title === 'Sửa kho' && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={draft.active}
+                onChange={(e) => update('active', e.target.checked)}
+              />
+              Kho đang hoạt động
+            </label>
+          )}
+        </>
+      );
+    if (title === 'Danh mục')
+      return (
+        <>
+          <Input label="Mã" value={draft.code} set={(v) => update('code', v)} />
+          <Input
+            label="Tên"
+            value={draft.name}
+            set={(v) => update('name', v)}
+          />
+          {tab === 'locations' && (
+            <>
+              <Select
+                label="Cấp vị trí"
+                value={draft.kind}
+                rows={['AREA', 'AISLE', 'BIN'].map((x) => ({
+                  id: x,
+                  name: { AREA: 'Khu vực', AISLE: 'Dãy', BIN: 'Ô chứa hàng' }[
+                    x
+                  ],
+                }))}
+                set={(v) => {
+                  update('kind', v);
+                  update('parentId', '');
+                }}
+              />
+              {draft.kind !== 'AREA' && (
+                <Select
+                  label="Vị trí cha"
+                  value={draft.parentId}
+                  rows={catalog.locations.filter(
+                    (l: Row) =>
+                      l.active &&
+                      l.kind === (draft.kind === 'AISLE' ? 'AREA' : 'AISLE'),
+                  )}
+                  set={(v) => update('parentId', v)}
+                />
+              )}
+            </>
+          )}
+          {tab === 'skus' && (
+            <>
+              <Input
+                label="Mã vạch"
+                value={draft.barcode}
+                set={(v) => update('barcode', v)}
+                required={false}
+              />
+              <Select
+                label="Đơn vị cơ sở"
+                value={draft.uomId}
+                rows={catalog.uoms.filter((u: Row) => u.active)}
+                set={(v) => update('uomId', v)}
+              />
+            </>
+          )}
+          {tab === 'uoms' && (
+            <Input
+              label="Ký hiệu"
+              value={draft.symbol}
+              set={(v) => update('symbol', v)}
+            />
+          )}
+        </>
+      );
+    if (title === 'Sửa phiếu')
+      return (
+        <>
+          <Input
+            label="Loại nguồn"
+            value={draft.sourceType}
+            set={(v) => update('sourceType', v)}
+          />
+          <Input
+            label="Số nguồn"
+            value={draft.sourceRef}
+            set={(v) => update('sourceRef', v)}
+          />
+          {draft.lines.map((l: Row, i: number) => (
+            <Input
+              key={i}
+              label={'Dòng ' + l.lineNo + ' · lượng theo đơn vị giao dịch'}
+              type="number"
+              value={l.qty}
+              set={(v) => lineChange(i, 'qty', v)}
+            />
+          ))}
+        </>
+      );
+    if (title === 'Tạo phiếu nhập' || title === 'Tạo phiếu xuất')
+      return (
+        <>
+          <div className="form-grid">
+            <Input
+              label="Loại chứng từ nguồn"
+              value={draft.sourceType}
+              set={(v) => update('sourceType', v)}
+            />
+            <Input
+              label="Số chứng từ nguồn"
+              value={draft.sourceRef}
+              set={(v) => update('sourceRef', v)}
+            />
+          </div>
+          {lineForm()}
+        </>
+      );
+    if (title === 'Tạo đợt kiểm kê')
+      return (
+        <>
+          <p className="muted">
+            Chọn các cặp vị trí và hàng hóa thuộc phạm vi đợt. Mốc T0 được chụp
+            khi mở đợt.
+          </p>
+          {draft.items.map((r: Row, i: number) => (
+            <div className="line" key={i}>
+              <Select
+                label="Ô chứa hàng"
+                value={r.locationId}
+                rows={catalog.locations.filter(
+                  (l: Row) => l.kind === 'BIN' && l.active,
+                )}
+                set={(v) =>
+                  update(
+                    'items',
+                    draft.items.map((x: Row, n: number) =>
+                      n === i ? { ...x, locationId: v } : x,
+                    ),
+                  )
+                }
+              />
+              <Select
+                label="Hàng hóa"
+                value={r.skuId}
+                rows={catalog.skus.filter((l: Row) => l.active)}
+                set={(v) =>
+                  update(
+                    'items',
+                    draft.items.map((x: Row, n: number) =>
+                      n === i ? { ...x, skuId: v } : x,
+                    ),
+                  )
+                }
+              />
+            </div>
+          ))}
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              update('items', [...draft.items, { locationId: '', skuId: '' }])
+            }
+          >
+            + Thêm phạm vi
+          </button>
+        </>
+      );
+    if (title === 'Ngưỡng tồn tối thiểu')
+      return (
+        <>
+          <Select
+            label="Hàng hóa"
+            value={draft.skuId}
+            rows={catalog.skus}
+            set={(v) => update('skuId', v)}
+          />
+          <Input
+            label="Ngưỡng (đơn vị cơ sở)"
+            type="number"
+            value={draft.minQty}
+            set={(v) => update('minQty', v)}
+          />
+        </>
+      );
+    if (title === 'Quy đổi đơn vị')
+      return (
+        <>
+          <Select
+            label="Hàng hóa"
+            value={draft.skuId}
+            rows={catalog.skus}
+            set={(v) => update('skuId', v)}
+          />
+          <Select
+            label="Đơn vị giao dịch"
+            value={draft.uomId}
+            rows={catalog.uoms}
+            set={(v) => update('uomId', v)}
+          />
+          <Input
+            label="1 đơn vị giao dịch = bao nhiêu đơn vị cơ sở?"
+            type="number"
+            value={draft.factor}
+            set={(v) => update('factor', v)}
+          />
+        </>
+      );
+    if (title === 'Nhập vị trí từ Excel')
+      return (
+        <>
+          <a className="link" href={root + '/location-imports/template'}>
+            Tải mẫu Excel
+          </a>
+          <Field label="Tệp .xlsx">
+            <input
+              type="file"
+              accept=".xlsx"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                update('preview', null);
+                const data = new FormData();
+                data.append('file', f);
+                await run(async () => {
+                  const p = await api(root + '/location-imports/preview', data);
+                  update('preview', p);
+                });
+              }}
+            />
+          </Field>
+          {draft.preview && (
+            <>
+              <p>
+                {draft.preview.rows.length} dòng · {draft.preview.errors.length}{' '}
+                lỗi
+              </p>
+              <Table
+                rows={draft.preview.errors}
+                columns={[
+                  ['row', 'Dòng'],
+                  ['message', 'Nội dung lỗi'],
+                ]}
+              />
+            </>
+          )}
+        </>
+      );
+    if (title === 'Kiểm nhận')
+      return (
+        <>
+          <p className="muted">
+            Nhập số lượng theo đơn vị cơ sở. Mỗi dòng phải có ô nhận hàng.
+          </p>
+          {draft.lines.map((l: Row, i: number) => (
+            <div className="line" key={i}>
+              <strong>
+                Dòng {l.lineNo} · {l.skuLabel}
+              </strong>
+              <Select
+                label="Ô nhận hàng"
+                value={l.locationId}
+                rows={catalog.locations.filter(
+                  (l: Row) => l.kind === 'BIN' && l.active,
+                )}
+                set={(v) => lineChange(i, 'locationId', v)}
+              />
+              <Input
+                label="Thực nhận"
+                type="number"
+                value={l.receivedQty}
+                set={(v) => lineChange(i, 'receivedQty', v)}
+              />
+              <Input
+                label="Phần không được phép xuất"
+                type="number"
+                value={l.blockedQty}
+                set={(v) => lineChange(i, 'blockedQty', v)}
+              />
+            </div>
+          ))}
+        </>
+      );
+    if (title === 'Phân bổ giữ hàng')
+      return (
+        <>
+          <p className="muted">
+            Phân bổ đủ lượng yêu cầu mỗi dòng. Có thể thêm nhiều vị trí cho cùng
+            một dòng.
+          </p>
+          {draft.allocations.map((a: Row, i: number) => (
+            <div className="line" key={i}>
+              <Select
+                label="Dòng xuất"
+                value={a.lineNo}
+                rows={draft.sourceLines}
+                idKey="line_no"
+                labelKey="sku_code"
+                set={(v) =>
+                  update(
+                    'allocations',
+                    draft.allocations.map((x: Row, n: number) =>
+                      n === i ? { ...x, lineNo: v } : x,
+                    ),
+                  )
+                }
+              />
+              <Select
+                label="Vị trí"
+                value={a.locationId}
+                rows={catalog.locations.filter(
+                  (l: Row) => l.kind === 'BIN' && l.active,
+                )}
+                set={(v) =>
+                  update(
+                    'allocations',
+                    draft.allocations.map((x: Row, n: number) =>
+                      n === i ? { ...x, locationId: v } : x,
+                    ),
+                  )
+                }
+              />
+              <Input
+                label="Lượng giữ (đơn vị cơ sở)"
+                type="number"
+                value={a.qty}
+                set={(v) =>
+                  update(
+                    'allocations',
+                    draft.allocations.map((x: Row, n: number) =>
+                      n === i ? { ...x, qty: v } : x,
+                    ),
+                  )
+                }
+              />
+              {draft.allocations.length > 1 && (
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() =>
+                    update(
+                      'allocations',
+                      draft.allocations.filter((_: Row, n: number) => n !== i),
+                    )
+                  }
+                >
+                  Bỏ phân bổ
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            className="secondary"
+            type="button"
+            onClick={() =>
+              update('allocations', [
+                ...draft.allocations,
+                { lineNo: '', locationId: '', qty: '' },
+              ])
+            }
+          >
+            + Thêm phân bổ
+          </button>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={!!draft.returnedPicked}
+              onChange={(e) => update('returnedPicked', e.target.checked)}
+            />
+            Đã hoàn trả hàng soạn bị ảnh hưởng (nếu có)
+          </label>
+        </>
+      );
+    if (title === 'Ghi số lượng soạn')
+      return (
+        <>
+          {draft.picks.map((p: Row, i: number) => (
+            <div className="line" key={i}>
+              <strong>
+                Phân bổ #{p.reservationId} · tối đa {p.max}
+              </strong>
+              <Input
+                label="Quét / nhập mã hàng hoặc mã vạch"
+                value={p.scanCode}
+                set={(v) =>
+                  update(
+                    'picks',
+                    draft.picks.map((x: Row, n: number) =>
+                      n === i ? { ...x, scanCode: v } : x,
+                    ),
+                  )
+                }
+              />
+              <Input
+                label="Quét / nhập mã vị trí"
+                value={p.locationCode}
+                set={(v) =>
+                  update(
+                    'picks',
+                    draft.picks.map((x: Row, n: number) =>
+                      n === i ? { ...x, locationCode: v } : x,
+                    ),
+                  )
+                }
+              />
+              <Input
+                label="Số lượng đã soạn"
+                type="number"
+                value={p.qty}
+                set={(v) =>
+                  update(
+                    'picks',
+                    draft.picks.map((x: Row, n: number) =>
+                      n === i ? { ...x, qty: v } : x,
+                    ),
+                  )
+                }
+              />
+            </div>
+          ))}
+        </>
+      );
+    if (title === 'Phân công')
+      return (
+        <Select
+          label="Nhân viên đếm"
+          value={draft.username}
+          rows={catalog.users.filter((u: Row) => u.role === 'ACT03')}
+          idKey="username"
+          labelKey="username"
+          set={(v) => update('username', v)}
+        />
+      );
+    if (title === 'Ghi kết quả đếm')
+      return (
+        <Input
+          label="Số thực tế (đơn vị cơ sở)"
+          type="number"
+          value={draft.qty}
+          set={(v) => update('qty', v)}
+        />
+      );
+    if (title === 'Bàn giao')
+      return (
+        <>
+          <Input
+            label="Người nhận"
+            value={draft.receiverName}
+            set={(v) => update('receiverName', v)}
+          />
+          <Input
+            label="Số tham chiếu bàn giao"
+            value={draft.sourceRef}
+            set={(v) => update('sourceRef', v)}
+            required={false}
+          />
+        </>
+      );
+    if (title === 'Đề nghị sửa nhập')
+      return (
+        <>
+          <Input
+            label="Lý do"
+            value={draft.reason}
+            set={(v) => update('reason', v)}
+          />
+          {draft.lines.map((l: Row, i: number) => (
+            <div className="line" key={i}>
+              <strong>Dòng {l.lineNo}</strong>
+              <Input
+                label="Chênh lệch tồn (+ tăng / − giảm)"
+                value={l.deltaBook}
+                set={(v) => lineChange(i, 'deltaBook', v)}
+              />
+              <Input
+                label="Chênh lệch lượng bị chặn"
+                value={l.deltaBlocked}
+                set={(v) => lineChange(i, 'deltaBlocked', v)}
+              />
+            </div>
+          ))}
+          <p className="muted">
+            Chỉ gửi những dòng có thay đổi. Hồ sơ chờ duyệt không đổi tồn.
+          </p>
+        </>
+      );
+    return (
+      <>
+        <p className="muted">
+          {title === 'Duyệt hồ sơ'
+            ? 'Chấp thuận hồ sơ theo đúng phiên bản đang xem.'
+            : 'Xác nhận thao tác với hồ sơ đang chọn.'}
+        </p>
+        {'reason' in draft && (
+          <Field label="Chứng cứ (PDF / PNG / JPEG, tối đa 5 MB)">
+            <input
+              type="file"
+              accept="application/pdf,image/png,image/jpeg"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                const data = new FormData();
+                data.append('file', f);
+                await run(async () => {
+                  const saved = await api(root + '/evidence', data);
+                  update('evidenceIds', [
+                    ...(draft.evidenceIds || []),
+                    saved.id,
+                  ]);
+                });
+              }}
+            />
+            {draft.evidenceIds?.length > 0 && (
+              <small>Đã đính kèm {draft.evidenceIds.length} tệp.</small>
+            )}
+          </Field>
+        )}
+        {'reason' in draft && (
+          <Input
+            label="Lý do / giải trình"
+            value={draft.reason}
+            set={(v) => update('reason', v)}
+          />
+        )}
+        {'resolution' in draft && (
+          <Input
+            label="Biện pháp xử lý"
+            value={draft.resolution}
+            set={(v) => update('resolution', v)}
+          />
+        )}
+        {'note' in draft && (
+          <Input
+            label="Nhận xét"
+            value={draft.note}
+            set={(v) => update('note', v)}
+            required={false}
+          />
+        )}
+        {'returnedPicked' in draft && (
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={draft.returnedPicked}
+              onChange={(e) => update('returnedPicked', e.target.checked)}
+            />
+            Đã hoàn trả toàn bộ hàng đã soạn (nếu có)
+          </label>
+        )}
+      </>
+    );
+  }
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-15
+   * Use case: UC-IN-008, UC-OUT-001, UC-CNT-001
+   *
+   * Mở chi tiết phiếu nhập, phiếu xuất hoặc đợt kiểm kê được chọn.
+   * Nạp bản ghi mới từ máy chủ để lấy đúng trạng thái và phiên bản trước khi thực hiện lệnh tiếp
+   * theo.
+   */
+  async function openRow(r: Row) {
+    if (busy) return;
+    if (page === 'inbound' || page === 'outbound' || page === 'counting') {
+      setBusy(true);
+      setError('');
+      try {
+        const path =
+          page === 'inbound'
+            ? '/receipts/'
+            : page === 'outbound'
+              ? '/shipments/'
+              : '/count-sessions/';
+        const record = await api(root + path + r.id);
+        setDetail(record);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setBusy(false);
+      }
+    } else setDetail(r);
+  }
+  const filtered = rows.filter((r) =>
+    JSON.stringify(r).toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+  );
+
+  /**
+   * Người viết: Khuất Văn Nam
+   * Ngày viết: 2026-11-16
+   * Use case: UC-IN-001 đến UC-IN-007; UC-OUT-001 đến UC-OUT-006
+   *
+   * Chuẩn bị biểu mẫu lệnh cho phiếu nhập hoặc phiếu xuất đang mở.
+   * Đính kèm phiên bản của phiếu để máy chủ phát hiện dữ liệu đã thay đổi.
+   */
+  function actionButton(
+    label: string,
+    action: string,
+    extra: Row = {},
+    title = label,
+  ) {
+    const type =
+      page === 'inbound'
+        ? 'receipts'
+        : page === 'outbound'
+          ? 'shipments'
+          : 'count-sessions';
+    return (
+      <button
+        className="secondary"
+        onClick={() =>
+          command(title, `/${type}/${detail!.id}/${action}`, {
+            version: detail!.version,
+            ...extra,
+          })
+        }
+      >
+        {label}
+      </button>
+    );
+  }
+  function detailPanel() {
+    if (!detail) return null;
+    return (
+      <aside className="detail">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">CHI TIẾT HỒ SƠ</p>
+            <h2>{detail.code || '#' + detail.id}</h2>
+          </div>
+          <button
+            className="icon-btn"
+            onClick={() => setDetail(null)}
+            aria-label="Đóng chi tiết"
+          >
+            ×
+          </button>
+        </div>
+        <div className="detail-meta">
+          <Badge value={detail.status} />
+          {detail.version !== undefined && (
+            <span>Phiên bản {detail.version}</span>
+          )}
+          <span>{detail.source_ref || ''}</span>
+        </div>
+        {detail.lines && (
+          <Table
+            rows={detail.lines}
+            columns={[
+              ['line_no', 'Dòng'],
+              ['sku_code', 'SKU'],
+              [
+                page === 'inbound' ? 'expected_qty' : 'requested_qty',
+                'Số lượng cơ sở',
+              ],
+              ['received_qty', 'Thực nhận'],
+              ['location_id', 'Vị trí'],
+            ]}
+          />
+        )}
+        {detail.reservations && (
+          <>
+            <h3>Phân bổ giữ hàng</h3>
+            <Table
+              rows={detail.reservations}
+              columns={[
+                ['id', 'ID'],
+                ['line_no', 'Dòng'],
+                ['location_id', 'Vị trí'],
+                ['qty_held', 'Giữ'],
+                ['qty_picked', 'Soạn'],
+                ['status', 'Trạng thái'],
+              ]}
+            />
+          </>
+        )}
+        <div className="actions">
+          {['inbound', 'outbound'].includes(page) &&
+            isStaff &&
+            ['DRAFT', 'RETURNED'].includes(detail.status) &&
+            actionButton('Sửa phiếu', 'update', {
+              sourceType: detail.source_type,
+              sourceRef: detail.source_ref,
+              lines: detail.lines.map((l: Row) => ({
+                lineNo: l.line_no,
+                qty: l.entered_qty,
+              })),
+            })}
+          {page === 'inbound' && (
+            <>
+              {isStaff &&
+                ['DRAFT', 'RETURNED'].includes(detail.status) &&
+                actionButton('Gửi kiểm nhận', 'submit')}
+              {isStaff &&
+                ['RECEIVING', 'DISCREPANCY'].includes(detail.status) &&
+                actionButton('Kiểm nhận', 'receive', {
+                  lines: detail.lines.map((l: Row) => ({
+                    lineNo: l.line_no,
+                    skuLabel: l.sku_code,
+                    locationId: l.location_id || '',
+                    receivedQty: l.received_qty ?? l.expected_qty,
+                    blockedQty: l.blocked_qty || '0',
+                  })),
+                })}
+              {isStaff &&
+                detail.status === 'DISCREPANCY' &&
+                actionButton('Trình sai lệch', 'discrepancy', { reason: '' })}
+              {isStaff &&
+                detail.status === 'READY' &&
+                actionButton('Chốt nhập kho', 'confirm')}
+              {['ACT02', 'ACT03'].includes(role) &&
+                !['POSTED', 'CANCELLED'].includes(detail.status) &&
+                actionButton('Hủy phiếu', 'cancel', { reason: '' })}
+              {['ACT02', 'ACT03'].includes(role) &&
+                detail.status === 'POSTED' &&
+                actionButton('Đề nghị đảo nhập', 'corrections', {
+                  reason: '',
+                  reverse: true,
+                })}
+              {['ACT02', 'ACT03'].includes(role) &&
+                detail.status === 'POSTED' &&
+                actionButton('Đề nghị sửa nhập', 'corrections', {
+                  reason: '',
+                  lines: detail.lines.map((l: Row) => ({
+                    lineNo: l.line_no,
+                    deltaBook: '0',
+                    deltaBlocked: '0',
+                  })),
+                })}
+            </>
+          )}
+          {page === 'outbound' && (
+            <>
+              {['ACT02', 'ACT03'].includes(role) &&
+                ['DRAFT', 'RETURNED', 'ISSUE'].includes(detail.status) &&
+                actionButton(
+                  'Phân bổ giữ hàng',
+                  detail.status === 'ISSUE' ? 'reallocate' : 'reserve',
+                  {
+                    allocations: detail.lines.map((l: Row) => ({
+                      lineNo: l.line_no,
+                      locationId: '',
+                      qty: l.requested_qty,
+                    })),
+                    sourceLines: detail.lines,
+                    returnedPicked: false,
+                  },
+                )}
+              {isStaff &&
+                ['READY', 'PICKING'].includes(detail.status) &&
+                actionButton('Ghi số lượng soạn', 'pick', {
+                  picks: detail.reservations
+                    .filter((h: Row) => h.status === 'ACTIVE')
+                    .map((h: Row) => ({
+                      reservationId: h.id,
+                      qty: h.qty_picked,
+                      max: h.qty_held,
+                    })),
+                })}
+              {isStaff &&
+                ['READY', 'PICKING', 'PICKED'].includes(detail.status) &&
+                actionButton('Báo thiếu / sai', 'issues', { reason: '' })}
+              {isStaff &&
+                detail.status === 'PICKED' &&
+                actionButton('Bàn giao', 'confirm', {
+                  receiverName: '',
+                  sourceRef: '',
+                })}
+              {['ACT02', 'ACT03'].includes(role) &&
+                !['POSTED', 'CANCELLED'].includes(detail.status) &&
+                actionButton('Hủy phiếu', 'cancel', {
+                  reason: '',
+                  returnedPicked: false,
+                })}
+              {detail.status === 'POSTED' && (
+                <a
+                  className="button secondary"
+                  href={`${root}/minutes/handover/${detail.id}/pdf`}
+                >
+                  Tải biên bản PDF
+                </a>
+              )}
+            </>
+          )}
+          {page === 'counting' && (
+            <>
+              {isManager &&
+                detail.status === 'DRAFT' &&
+                actionButton('Mở đợt', 'open')}
+              {isManager &&
+                detail.status === 'OPEN' &&
+                actionButton('Khóa biên bản', 'close', { note: '' })}
+              {detail.status === 'CLOSED' &&
+                ['ACT02', 'ACT09'].includes(role) && (
+                  <a
+                    className="button secondary"
+                    href={`${root}/minutes/count/${detail.id}/pdf`}
+                  >
+                    Tải biên bản PDF
+                  </a>
+                )}
+            </>
+          )}
+          {page === 'catalog' && isManager && (
+            <>
+              <button
+                className="secondary"
+                onClick={() =>
+                  dialog(
+                    'Danh mục',
+                    {
+                      ...detail,
+                      uomId: detail.uom_id,
+                      parentId: detail.parent_id,
+                    },
+                    async () => {},
+                  )
+                }
+              >
+                Sửa thông tin
+              </button>
+              <button
+                className="secondary"
+                onClick={() =>
+                  run(() =>
+                    send('/catalog/' + tab, {
+                      ...detail,
+                      uomId: detail.uom_id,
+                      parentId: detail.parent_id,
+                      active: !detail.active,
+                    }),
+                  ).then((ok) => {
+                    if (ok) setDetail(null);
+                  })
+                }
+              >
+                {detail.active ? 'Ngừng sử dụng' : 'Kích hoạt'}
+              </button>
+            </>
+          )}
+          {page === 'stock' &&
+            tab === 'alerts' &&
+            isManager &&
+            detail.status !== 'RESOLVED' && (
+              <button
+                className="secondary"
+                onClick={() =>
+                  command('Tiếp nhận cảnh báo', `/alerts/${detail.id}/handle`, {
+                    version: detail.version,
+                    resolution: '',
+                  })
+                }
+              >
+                Tiếp nhận xử lý
+              </button>
+            )}
+          {page === 'approval' && detail.status === 'PENDING' && (
+            <>
+              {[true, false].map((accept) => {
+                const type = detail.receipt_id
+                  ? 'receipts'
+                  : detail.shipment_id
+                    ? 'shipments'
+                    : 'adjustments';
+                const id =
+                  detail.receipt_id ||
+                  detail.shipment_id ||
+                  detail.adjustment_id;
+                return (
+                  <button
+                    key={String(accept)}
+                    className={accept ? 'primary' : 'secondary'}
+                    onClick={() =>
+                      command(
+                        accept ? 'Duyệt hồ sơ' : 'Từ chối hồ sơ',
+                        `/${type}/${id}/decision`,
+                        {
+                          version: detail.target_version,
+                          accept,
+                          ...(!accept ? { reason: '' } : {}),
+                        },
+                      )
+                    }
+                  >
+                    {accept ? 'Chấp thuận' : 'Từ chối'}
+                  </button>
+                );
+              })}
+            </>
+          )}
+        </div>
+        {page === 'approval' && (
+          <ApprovalContent approval={detail} catalog={catalog} />
+        )}
+        {page === 'counting' &&
+          detail.items?.map((i: Row) => (
+            <div className="count-card" key={i.id}>
+              <div className="section-head">
+                <strong>
+                  {i.location_code} / {i.sku_code}
+                </strong>
+                <Badge value={i.status} />
+              </div>
+              <p>
+                Người đếm: {i.assigned_to || 'Chưa giao'} · Sổ T0:{' '}
+                {num(i.book_at_t0)} · Đếm: {i.counted_qty ?? '—'} · Delta:{' '}
+                {i.delta ?? '—'}
+              </p>
+              <div className="actions">
+                {[
+                  ...(isManager && ['WAITING', 'ASSIGNED'].includes(i.status)
+                    ? [['Phân công', 'assign', { username: '' }]]
+                    : []),
+                  ...(isStaff && ['ASSIGNED', 'RECOUNT'].includes(i.status)
+                    ? [['Bắt đầu đếm', 'start', {}]]
+                    : []),
+                  ...(isStaff && i.status === 'COUNTING'
+                    ? [['Ghi kết quả đếm', 'record', { qty: '' }]]
+                    : []),
+                  ...(['ACT02', 'ACT03'].includes(role) &&
+                    i.status === 'COUNTED'
+                    ? [['Đối chiếu', 'reconcile', {}]]
+                    : []),
+                  ...(isStaff && i.status === 'VARIANCE'
+                    ? [['Lập đề nghị', 'request-adjustment', { reason: '' }]]
+                    : []),
+                  ...(isManager &&
+                    [
+                      'COUNTING',
+                      'COUNTED',
+                      'VARIANCE',
+                      'PENDING',
+                      'MATCHED',
+                    ].includes(i.status)
+                    ? [['Yêu cầu đếm lại', 'recount', { reason: '' }]]
+                    : []),
+                ].map(([label, action, extra]: any) => (
+                  <button
+                    key={action}
+                    className="secondary"
+                    onClick={() =>
+                      command(label, `/count-items/${i.id}/${action}`, {
+                        version: i.version,
+                        ...extra,
+                      })
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        {!detail.lines && !detail.items && page !== 'approval' && (
+          <dl>
+            {Object.entries(detail)
+              .filter(([, v]) => typeof v !== 'object')
+              .map(([k, v]) => (
+                <div key={k}>
+                  <dt>{k}</dt>
+                  <dd>{fmt(v)}</dd>
+                </div>
+              ))}
+          </dl>
+        )}
+      </aside>
+    );
+  }
+  if (checking) return <div className="loading-screen">Đang kết nối SLMS…</div>;
+  if (!me)
+    return (
+      <main className="login">
+        <section className="login-story">
+          <div className="brand">
+            ▦{' '}
+            <span>
+              SLMS<span className="brand-light"> / M01</span>
+            </span>
+          </div>
+          <div>
+            <p className="eyebrow">QUẢN LÝ KHO VÀ TỒN KHO</p>
+            <h1>
+              Mọi chuyển động.
+              <br />
+              Một nguồn dữ liệu.
+            </h1>
+            <p>
+              Quản lý nhập, xuất và kiểm kê trên cùng một hệ thống. Theo dõi số
+              dư và truy vết đến từng giao dịch.
+            </p>
+            <div className="story-stats">
+              <span>
+                05 <small>Phân hệ nghiệp vụ</small>
+              </span>
+              <span>
+                32 <small>Use case</small>
+              </span>
+            </div>
+          </div>
+          <small>SLMS · Nhóm 03 / PTIT</small>
+        </section>
+        <section className="login-form">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              await run(async () => {
+                await login(username, password);
+                const u = await api('/api/auth/me');
+                setMe(u);
+                setWarehouse(String(u.warehouses[0]?.id || ''));
+              }, '');
+            }}
+          >
+            <p className="eyebrow">KHÔNG GIAN LÀM VIỆC</p>
+            <h2>Đăng nhập hệ thống</h2>
+            <p className="muted">Sử dụng tài khoản được cấp để tiếp tục.</p>
+            {error && (
+              <div role="alert" className="error">
+                {error}
+              </div>
+            )}
+            <Input label="Tên đăng nhập" value={username} set={setUsername} />
+            <Input
+              label="Mật khẩu"
+              type="password"
+              value={password}
+              set={setPassword}
+            />
+            <button className="primary full" disabled={busy}>
+              {busy ? 'Đang đăng nhập…' : 'Đăng nhập →'}
+            </button>
+            <p className="footnote">
+              Vai trò và phạm vi kho được kiểm tra tại máy chủ.
+            </p>
+          </form>
+        </section>
+      </main>
+    );
+  const titles: Record<string, string> = {
+    overview: 'Tổng quan kho',
+    catalog: 'Danh mục',
+    inbound: 'Nhập kho',
+    outbound: 'Xuất kho',
+    stock: 'Tồn kho & cảnh báo',
+    counting: 'Kiểm kê',
+    approval: 'Phê duyệt',
+    adjustments: 'Hồ sơ điều chỉnh',
+    reports: 'Báo cáo nhập · xuất · tồn',
+  };
+  const nav = [
+    ['overview', '◫', 'Tổng quan'],
+    ['catalog', '▦', 'Danh mục'],
+    ['inbound', '↙', 'Nhập kho'],
+    ['outbound', '↗', 'Xuất kho'],
+    ['stock', '▤', 'Tồn kho'],
+    ['counting', '✓', 'Kiểm kê'],
+    ['approval', '◇', 'Phê duyệt'],
+    ['adjustments', '⇄', 'Điều chỉnh'],
+    ['reports', '▥', 'Báo cáo'],
+  ].filter(([k]) => !isStaff || !['reports', 'approval'].includes(k));
+  const columns: [string, string][] =
+    page === 'catalog'
+      ? tab === 'locations'
+        ? [
+          ['code', 'Mã vị trí'],
+          ['name', 'Tên vị trí'],
+          ['kind', 'Cấp'],
+          ['parent_id', 'ID cha'],
+          ['active', 'Trạng thái'],
+        ]
+        : tab === 'skus'
+          ? [
+            ['code', 'SKU'],
+            ['name', 'Tên hàng'],
+            ['barcode', 'Mã vạch'],
+            ['symbol', 'Đơn vị'],
+            ['active', 'Trạng thái'],
+          ]
+          : [
+            ['code', 'Mã đơn vị'],
+            ['name', 'Tên đơn vị'],
+            ['symbol', 'Ký hiệu'],
+            ['active', 'Trạng thái'],
+          ]
+      : page === 'inbound' || page === 'outbound'
+        ? [
+          ['code', 'Mã phiếu'],
+          ['source_ref', 'Chứng từ nguồn'],
+          ['status', 'Trạng thái'],
+          ['created_by', 'Người lập'],
+          ['created_at', 'Ngày lập'],
+        ]
+        : page === 'counting'
+          ? [
+            ['code', 'Đợt kiểm kê'],
+            ['status', 'Trạng thái'],
+            ['owner_id', 'Phụ trách'],
+            ['opened_at', 'Mốc T0'],
+          ]
+          : page === 'approval'
+            ? [
+              ['id', 'Hồ sơ'],
+              ['receipt_id', 'Phiếu nhập'],
+              ['shipment_id', 'Phiếu xuất'],
+              ['adjustment_id', 'Điều chỉnh'],
+              ['level_code', 'Cấp duyệt'],
+              ['status', 'Trạng thái'],
+            ]
+            : page === 'adjustments'
+              ? [
+                ['id', 'Mã hồ sơ'],
+                ['kind', 'Loại'],
+                ['reason', 'Lý do'],
+                ['status', 'Trạng thái'],
+                ['created_by', 'Người lập'],
+              ]
+              : page === 'stock' && tab === 'alerts'
+                ? [
+                  ['sku_code', 'SKU'],
+                  ['sku_name', 'Tên hàng'],
+                  ['observed_qty', 'Khả dụng'],
+                  ['threshold_qty', 'Ngưỡng'],
+                  ['status', 'Trạng thái'],
+                ]
+                : page === 'stock' && tab === 'ledger'
+                  ? [
+                    ['batch_id', 'Giao dịch'],
+                    ['sku_code', 'SKU'],
+                    ['location_code', 'Vị trí'],
+                    ['before_book', 'Trước'],
+                    ['delta_book', 'Biến động'],
+                    ['after_book', 'Sau'],
+                    ['posted_at', 'Thời điểm'],
+                  ]
+                  : page === 'reports'
+                    ? [
+                      ['sku_code', 'SKU'],
+                      ['sku_name', 'Tên hàng'],
+                      ['opening_qty', 'Đầu kỳ'],
+                      ['inbound_qty', 'Nhập'],
+                      ['outbound_qty', 'Xuất'],
+                      ['adjustment_qty', 'Điều chỉnh'],
+                      ['closing_qty', 'Cuối kỳ'],
+                    ]
+                    : [
+                      ['sku_code', 'SKU'],
+                      ['sku_name', 'Tên hàng'],
+                      ['location_code', 'Vị trí'],
+                      ['book_qty', 'Ghi sổ'],
+                      ['held_qty', 'Đã giữ'],
+                      ['blocked_qty', 'Bị chặn'],
+                      ['available_qty', 'Khả dụng'],
+                    ];
+  const tabs =
+    page === 'catalog'
+      ? [
+        ['locations', 'Vị trí kho'],
+        ['skus', 'Hàng hóa'],
+        ['uoms', 'Đơn vị tính'],
+      ]
+      : page === 'stock'
+        ? [
+          ['balances', 'Số dư tồn'],
+          ['ledger', 'Thẻ kho'],
+          ['alerts', 'Cảnh báo'],
+        ]
+        : [];
+  return (
+    <div className="app">
+      <nav className="sidebar">
+        <div className="brand">
+          ▦{' '}
+          <span>
+            SLMS<span className="brand-light"> / M01</span>
+          </span>
+        </div>
+        <p className="nav-label">VẬN HÀNH KHO</p>
+        {nav.map(([key, icon, label]) => (
+          <button
+            key={key}
+            className={'nav-item ' + (page === key ? 'active' : '')}
+            onClick={() => {
+              setPage(key);
+              if (key === 'catalog') setTab('locations');
+              if (key === 'stock') setTab('balances');
+            }}
+          >
+            <span>{icon}</span>
+            {label}
+          </button>
+        ))}
+        <div className="sidebar-bottom">
+          <div className="avatar">{me.username.slice(0, 1).toUpperCase()}</div>
+          <div>
+            <strong>{me.username}</strong>
+            <small>
+              {role === 'ACT02'
+                ? 'Quản lý kho'
+                : role === 'ACT03'
+                  ? 'Nhân viên kho'
+                  : 'Lãnh đạo'}
+            </small>
+          </div>
+          <button
+            className="icon-btn"
+            onClick={() =>
+              run(async () => {
+                await logout();
+                setMe(null);
+                setWarehouse('');
+              }, '')
+            }
+            title="Đăng xuất"
+          >
+            ↪
+          </button>
+        </div>
+      </nav>
+      <div className="workspace">
+        <header className="topbar">
+          <span>
+            Không gian làm việc <b>/ {titles[page]}</b>
+          </span>
+          <div className="warehouse-select">
+            <span>Kho đang làm việc</span>
+            <select
+              value={warehouse}
+              onChange={(e) => {
+                setWarehouse(e.target.value);
+                setModal(null);
+              }}
+            >
+              {me.warehouses.map((w: Row) => (
+                <option value={w.id} key={w.id}>
+                  {w.code} · {w.name}
+                </option>
+              ))}
+            </select>
+            {isManager && warehouse && (
+              <button
+                className="icon-btn"
+                title="Thông tin kho"
+                onClick={() =>
+                  dialog(
+                    'Sửa kho',
+                    {
+                      ...me.warehouses.find(
+                        (w: Row) => String(w.id) === warehouse,
+                      ),
+                    },
+                    async () => {},
+                  )
+                }
+              >
+                ⚙
+              </button>
+            )}
+            {isManager && (
+              <button
+                className="icon-btn"
+                title="Tạo kho"
+                onClick={() =>
+                  dialog(
+                    'Tạo kho',
+                    { code: '', name: '', description: '' },
+                    async () => {},
+                  )
+                }
+              >
+                ＋
+              </button>
+            )}
+          </div>
+        </header>
+        <main className="main">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">SLMS / QUẢN LÝ KHO VÀ TỒN KHO</p>
+              <h1>{titles[page]}</h1>
+              <p className="muted">
+                {page === 'overview'
+                  ? 'Theo dõi số liệu vận hành từ sổ giao dịch của kho.'
+                  : 'Dữ liệu được giới hạn theo vai trò và kho đang làm việc.'}
+              </p>
+            </div>
+            <div className="actions">
+              <button
+                className="secondary"
+                disabled={loading || busy}
+                onClick={() => {
+                  load();
+                  refreshCatalog();
+                }}
+              >
+                ↻ Làm mới
+              </button>
+              {warehouse && isManager && page === 'catalog' && (
+                <button
+                  className="primary"
+                  onClick={() =>
+                    dialog(
+                      'Danh mục',
+                      {
+                        code: '',
+                        name: '',
+                        kind: 'AREA',
+                        symbol: '',
+                        barcode: '',
+                        uomId: '',
+                      },
+                      async () => {},
+                    )
+                  }
+                >
+                  + Thêm mới
+                </button>
+              )}
+              {warehouse &&
+                isStaff &&
+                ['inbound', 'outbound'].includes(page) && (
+                  <button
+                    className="primary"
+                    onClick={() =>
+                      dialog(
+                        page === 'inbound'
+                          ? 'Tạo phiếu nhập'
+                          : 'Tạo phiếu xuất',
+                        {
+                          sourceType: 'MANUAL',
+                          sourceRef: '',
+                          lines: [{ skuId: '', uomId: '', qty: '1' }],
+                        },
+                        async () => {},
+                      )
+                    }
+                  >
+                    + Tạo phiếu
+                  </button>
+                )}
+              {warehouse && isManager && page === 'counting' && (
+                <button
+                  className="primary"
+                  onClick={() =>
+                    dialog(
+                      'Tạo đợt kiểm kê',
+                      { items: [{ locationId: '', skuId: '' }] },
+                      async () => {},
+                    )
+                  }
+                >
+                  + Tạo đợt kiểm kê
+                </button>
+              )}
+            </div>
+          </div>
+          {error && (
+            <div className="error" role="alert">
+              {error}
+              <button onClick={() => setError('')}>×</button>
+            </div>
+          )}
+          {notice && (
+            <div className="notice" role="status">
+              {notice}
+              <button onClick={() => setNotice('')}>×</button>
+            </div>
+          )}
+          {!warehouse ? (
+            <section className="card empty">
+              <h2>Bắt đầu với kho đầu tiên</h2>
+              <p>
+                Tạo kho, đơn vị tính, hàng hóa và vị trí trước khi lập phiếu.
+              </p>
+              {isManager ? (
+                <button
+                  className="primary"
+                  onClick={() =>
+                    dialog(
+                      'Tạo kho',
+                      { code: '', name: '', description: '' },
+                      async () => {},
+                    )
+                  }
+                >
+                  + Tạo kho
+                </button>
+              ) : (
+                <p>Đề nghị quản lý tạo kho và cấp quyền truy cập.</p>
+              )}
+            </section>
+          ) : (
+            <>
+              {page === 'overview' && (
+                <div className="metrics">
+                  {[
+                    [
+                      'SKU có số dư',
+                      new Set(rows.map((r) => r.sku_id)).size,
+                      'Trên các vị trí trong bảng',
+                    ],
+                    [
+                      'Vị trí có số dư',
+                      new Set(rows.map((r) => r.location_id)).size,
+                      'Tối đa 200 cặp đang hiển thị',
+                    ],
+                    [
+                      'Cặp đang giữ',
+                      rows.filter((r) => Number(r.held_qty) > 0).length,
+                      'Giữ cho các phiếu xuất',
+                    ],
+                    [
+                      'Cặp có hàng bị chặn',
+                      rows.filter((r) => Number(r.blocked_qty) > 0).length,
+                      'Không được phép xuất',
+                    ],
+                  ].map(([label, value, sub]) => (
+                    <section className="metric" key={String(label)}>
+                      <p>{label}</p>
+                      <strong>{value}</strong>
+                      <small>{sub}</small>
+                    </section>
+                  ))}
+                </div>
+              )}
+              <section className="card">
+                {tabs.length > 0 && (
+                  <div className="tabs">
+                    {tabs.map(([key, label]) => (
+                      <button
+                        key={key}
+                        className={tab === key ? 'selected' : ''}
+                        onClick={() => setTab(key)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="toolbar">
+                  <input
+                    className="search"
+                    placeholder="Tìm trong danh sách đang hiển thị…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                  <span className="muted">{filtered.length} bản ghi</span>
+                  {page === 'catalog' && tab === 'locations' && isManager && (
+                    <button
+                      className="secondary"
+                      onClick={() =>
+                        dialog('Nhập vị trí từ Excel', {}, async () => {})
+                      }
+                    >
+                      Nhập Excel
+                    </button>
+                  )}
+                  {page === 'catalog' && tab === 'skus' && isManager && (
+                    <button
+                      className="secondary"
+                      onClick={() =>
+                        dialog(
+                          'Quy đổi đơn vị',
+                          { skuId: '', uomId: '', factor: '1' },
+                          async () => {},
+                        )
+                      }
+                    >
+                      Quy đổi đơn vị
+                    </button>
+                  )}
+                  {page === 'stock' && isManager && (
+                    <button
+                      className="secondary"
+                      onClick={() =>
+                        dialog(
+                          'Ngưỡng tồn tối thiểu',
+                          { skuId: '', minQty: '0' },
+                          async () => {},
+                        )
+                      }
+                    >
+                      Đặt ngưỡng tồn
+                    </button>
+                  )}
+                </div>
+                {page === 'reports' && (
+                  <div className="toolbar">
+                    <Input
+                      label="Từ ngày (giờ Việt Nam)"
+                      type="date"
+                      value={from}
+                      set={setFrom}
+                    />
+                    <Input
+                      label="Đến hết ngày"
+                      type="date"
+                      value={to}
+                      set={setTo}
+                    />
+                    <button className="secondary" onClick={load}>
+                      Xem báo cáo
+                    </button>
+                    <a
+                      className="button secondary"
+                      href={`${root}/reports/export?from=${encodeURIComponent(from + 'T00:00:00+07:00')}&to=${encodeURIComponent(new Date(new Date(to + 'T00:00:00+07:00').getTime() + 86400000).toISOString())}`}
+                    >
+                      Xuất Excel
+                    </a>
+                  </div>
+                )}
+                {loading ? (
+                  <div className="empty">Đang tải dữ liệu…</div>
+                ) : (
+                  <Table
+                    rows={filtered}
+                    columns={columns}
+                    onRow={
+                      page === 'reports' || page === 'overview'
+                        ? undefined
+                        : openRow
+                    }
+                  />
+                )}
+                <div className="table-foot">
+                  {page === 'stock'
+                    ? 'Tối đa 200 bản ghi mới nhất. API hỗ trợ phân trang offset/limit.'
+                    : 'Danh sách giới hạn 200 bản ghi. Chọn dòng để xem chi tiết và thao tác.'}
+                </div>
+              </section>
+            </>
+          )}
+          <footer>
+            SLMS M01 <span>Kho · Nhập · Tồn · Kiểm kê · Xuất</span>
+          </footer>
+        </main>
+      </div>
+      {detailPanel()}
+      {modal && (
+        <div
+          className="overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) close();
+          }}
+        >
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={modal.title}
+          >
+            <div className="section-head">
+              <h2>
+                {modal.title === 'Danh mục'
+                  ? (draft.id ? 'Sửa ' : 'Thêm ') +
+                  {
+                    locations: 'vị trí',
+                    skus: 'hàng hóa',
+                    uoms: 'đơn vị tính',
+                  }[tab]
+                  : modal.title}
+              </h2>
+              <button type="button" className="icon-btn" onClick={close}>
+                ×
+              </button>
+            </div>
+            <form onSubmit={saveModal}>
+              <div className="modal-body">
+                {error && <div className="error">{error}</div>}
+                {modalBody()}
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={close}
+                  disabled={busy}
+                >
+                  Đóng
+                </button>
+                <button
+                  className="primary"
+                  disabled={
+                    busy ||
+                    (modal.title === 'Nhập vị trí từ Excel' &&
+                      !draft.preview?.canCommit)
+                  }
+                >
+                  {busy ? 'Đang xử lý…' : 'Xác nhận'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+    </div>
+  );
 }

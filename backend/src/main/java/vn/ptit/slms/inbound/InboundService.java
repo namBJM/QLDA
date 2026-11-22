@@ -1,20 +1,237 @@
 package vn.ptit.slms.inbound;
-import vn.ptit.slms.common.*;import vn.ptit.slms.security.*;import vn.ptit.slms.catalog.*;import vn.ptit.slms.stock.*;import vn.ptit.slms.approval.*;import org.springframework.stereotype.Service;import java.util.*;import java.math.*;import static vn.ptit.slms.common.Db.*;
-@Service public class InboundService {
- private final Db db;private final AccessGuard g;private final CatalogService catalog;private final StockService stock;private final ApprovalService approval;private final Json json;
- public InboundService(Db d,AccessGuard g,CatalogService c,StockService s,ApprovalService a,Json j){db=d;this.g=g;catalog=c;stock=s;approval=a;json=j;}
- public Object list(long w){g.warehouse(w);return db.rows("select * from receipt where warehouse_id=? order by id desc limit 200",w);}
- public Map<String,Object> detail(long w,long id){g.warehouse(w);var r=new LinkedHashMap<>(db.one("select * from receipt where warehouse_id=? and id=?",w,id));r.put("lines",db.rows("select l.*,s.code sku_code from receipt_line l join sku s on s.id=l.sku_id where receipt_id=? order by line_no",id));return r;}
- @SuppressWarnings("unchecked") public Object create(long w,Map<String,Object> p){g.roles("ACT03");var lines=(List<Map<String,Object>>)p.get("lines");Problem.require(lines!=null&&!lines.isEmpty(),"LINES","Cần ít nhất một dòng.");long id=db.id("insert into receipt(warehouse_id,code,source_type,source_ref,source_occurrence_ref,status,created_by) values (?,?,?,?,?,'DRAFT',?) returning id",w,"PN-"+UUID.randomUUID().toString().substring(0,8).toUpperCase(),required(p,"sourceType"),required(p,"sourceRef"),UUID.randomUUID().toString(),g.actor());int n=0;for(var l:lines){long sku=lng(l.get("skuId")),uom=lng(l.get("uomId"));var factor=catalog.factor(sku,uom);var entered=qty(l.get("qty"));Problem.require(entered.signum()>0,"QUANTITY","Lượng dự kiến phải dương.");db.run("insert into receipt_line(receipt_id,line_no,warehouse_id,sku_id,uom_id,expected_qty,entered_qty,conversion_factor) values (?,?,?,?,?,?,?,?)",id,++n,w,sku,uom,catalog.base(entered,factor),entered,factor);}return detail(w,id);}
- public Object action(long w,long id,String action,Map<String,Object> p){var r=db.one("select * from receipt where warehouse_id=? and id=? for update",w,id);long version=lng(r.get("version"));Problem.require(version==lng(p.get("version")),"STALE_VERSION","Phiếu đã thay đổi; tải lại.");String status=r.get("status").toString(),next=status;var lines=db.rows("select * from receipt_line where receipt_id=? order by line_no",id);
- switch(action){case "update":{g.roles("ACT03");Problem.require(Set.of("DRAFT","RETURNED").contains(status),"STATE","Chỉ sửa nháp hoặc phiếu trả lại.");@SuppressWarnings("unchecked") var updates=(List<Map<String,Object>>)p.get("lines");Problem.require(updates!=null&&updates.size()==lines.size(),"LINES","Cần đủ các dòng hiện có.");Set<Long> seen=new HashSet<>();for(var l:updates){long no=lng(l.get("lineNo"));Problem.require(seen.add(no),"LINES","Dòng bị lặp.");var src=db.one("select * from receipt_line where receipt_id=? and line_no=?",id,no);BigDecimal entered=qty(l.get("qty"));Problem.require(entered.signum()>0,"QUANTITY","Lượng phải dương.");db.run("update receipt_line set entered_qty=?,expected_qty=?,received_qty=null,accepted_qty=null,blocked_qty=0 where receipt_id=? and line_no=?",entered,catalog.base(entered,dec(src.get("conversion_factor"))),id,no);}db.run("update receipt set source_type=?,source_ref=? where id=?",required(p,"sourceType"),required(p,"sourceRef"),id);next="DRAFT";break;}
- case "save-discrepancy":g.roles("ACT03");Problem.require(status.equals("DISCREPANCY"),"STATE","Phiếu không có sai lệch.");db.run("update receipt set discrepancy_draft=?::jsonb where id=?",json.write(p),id);break;
- case "submit":g.roles("ACT03");Problem.require(Set.of("DRAFT","RETURNED").contains(status),"STATE","Phiếu không ở trạng thái gửi.");next="RECEIVING";break;
- case "receive":{g.roles("ACT03");Problem.require(Set.of("RECEIVING","DISCREPANCY").contains(status),"STATE","Phiếu không ở bước kiểm nhận.");@SuppressWarnings("unchecked") var inputs=(List<Map<String,Object>>)p.get("lines");Problem.require(inputs!=null&&inputs.size()==lines.size(),"LINES","Gửi đủ mọi dòng kiểm nhận.");Set<Long> seen=new HashSet<>();boolean discrepancy=false;for(var l:inputs){long no=lng(l.get("lineNo"));Problem.require(seen.add(no),"LINES","Dòng bị lặp.");var original=db.one("select * from receipt_line where receipt_id=? and line_no=?",id,no);long loc=lng(l.get("locationId"));db.one("select * from location where warehouse_id=? and id=? and kind='BIN' and active for share",w,loc);BigDecimal received=qty(l.get("receivedQty")),blocked=qty(l.getOrDefault("blockedQty","0"));Problem.require(blocked.compareTo(received)<=0,"QUANTITY","Lượng bị chặn lớn hơn thực nhận.");discrepancy|=received.compareTo(dec(original.get("expected_qty")))!=0||blocked.signum()>0;db.run("update receipt_line set location_id=?,received_qty=?,accepted_qty=?,blocked_qty=?,condition_note=? where receipt_id=? and line_no=?",loc,received,received,blocked,text(l,"conditionNote"),id,no);}next=discrepancy?"DISCREPANCY":"READY";break;}
- case "discrepancy":g.roles("ACT03");Problem.require(status.equals("DISCREPANCY"),"STATE","Không có sai lệch để trình.");required(p,"reason");db.run("update receipt set discrepancy_draft=?::jsonb where id=?",json.write(p),id);approval.submit(w,"receipt",id,version+1,r.get("created_by").toString(),BigDecimal.ZERO,detail(w,id),false);next="PENDING";break;
- case "decision":{Problem.require(status.equals("PENDING"),"STATE","Phiếu không chờ duyệt.");boolean accept=Boolean.TRUE.equals(p.get("accept"));approval.decide(w,"receipt",id,version,accept,text(p,"reason"));next=accept?"READY":"RETURNED";break;}
- case "confirm":{g.roles("ACT03");Problem.require(status.equals("READY"),"STATE","Phiếu chưa đủ điều kiện chốt.");List<StockService.Key> keys=lines.stream().map(l->new StockService.Key(lng(l.get("location_id")),lng(l.get("sku_id")))).toList();stock.lock(w,keys);long batch=stock.batch(w,"IN",id);Map<StockService.Key,BigDecimal[]> totals=new TreeMap<>();for(var l:lines){var k=new StockService.Key(lng(l.get("location_id")),lng(l.get("sku_id")));var t=totals.computeIfAbsent(k,x->new BigDecimal[]{BigDecimal.ZERO,BigDecimal.ZERO});t[0]=t[0].add(dec(l.get("accepted_qty")));t[1]=t[1].add(dec(l.get("blocked_qty")));}for(var e:totals.entrySet())if(e.getValue()[0].signum()!=0)stock.movement(w,batch,e.getKey(),e.getValue()[0],e.getValue()[1]);next="POSTED";break;}
- case "cancel":g.roles("ACT02","ACT03");required(p,"reason");Problem.require(!Set.of("POSTED","CANCELLED").contains(status),"STATE","Không thể hủy phiếu đã chốt/hủy.");approval.cancel("receipt",id);next="CANCELLED";break;
- default:throw new IllegalArgumentException("Unknown receipt action");}
- db.run("update receipt set status=?,version=version+1 where id=?",next,id);return detail(w,id);}
+
+import static vn.ptit.slms.common.Db.*;
+
+import java.math.*;
+import java.util.*;
+import org.springframework.stereotype.Service;
+import vn.ptit.slms.approval.*;
+import vn.ptit.slms.catalog.*;
+import vn.ptit.slms.common.*;
+import vn.ptit.slms.security.*;
+import vn.ptit.slms.stock.*;
+
+@Service
+public class InboundService {
+
+    private final Db db;
+    private final AccessGuard g;
+    private final CatalogService catalog;
+    private final StockService stock;
+    private final ApprovalService approval;
+    private final Json json;
+
+    public InboundService(Db d, AccessGuard g, CatalogService c, StockService s, ApprovalService a,
+            Json j) {
+        db = d;
+        this.g = g;
+        catalog = c;
+        stock = s;
+        approval = a;
+        json = j;
+    }
+
+    /**
+     * Người viết: Khuất Văn Nam
+     * Ngày viết: 2026-11-09
+     * Use case: UC-IN-008
+     *
+     * Liệt kê tối đa 200 phiếu nhập mới nhất trong kho.
+     * Người dùng phải được cấp quyền truy cập kho.
+     */
+    public Object list(long w) {
+        g.warehouse(w);
+        return db.rows("select * from receipt where warehouse_id=? order by id desc limit 200", w);
+    }
+
+    /**
+     * Người viết: Khuất Văn Nam
+     * Ngày viết: 2026-11-09
+     * Use case: UC-IN-008
+     *
+     * Đọc phiếu nhập cùng các dòng hàng theo thứ tự dòng.
+     * Chỉ lấy phiếu thuộc kho được cấp quyền; không thay đổi dữ liệu phiếu.
+     */
+    public Map<String, Object> detail(long w, long id) {
+        g.warehouse(w);
+        var r = new LinkedHashMap<>(
+                db.one("select * from receipt where warehouse_id=? and id=?", w, id));
+        r.put("lines", db.rows(
+                "select l.*,s.code sku_code from receipt_line l join sku s on s.id=l.sku_id where receipt_id=? order by line_no",
+                id));
+        return r;
+    }
+
+    /**
+     * Người viết: Khuất Văn Nam
+     * Ngày viết: 2026-11-08
+     * Use case: UC-IN-001
+     *
+     * Lập phiếu nhập nháp từ chứng từ nguồn và các dòng hàng.
+     * Chỉ ACT03 được lập; mỗi dòng có lượng dương và lưu hệ số quy đổi tại thời điểm lập.
+     */
+    @SuppressWarnings("unchecked")
+    public Object create(long w, Map<String, Object> p) {
+        g.roles("ACT03");
+        var lines = (List<Map<String, Object>>) p.get("lines");
+        Problem.require(lines != null && !lines.isEmpty(), "LINES", "Cần ít nhất một dòng.");
+        long id = db.id(
+                "insert into receipt(warehouse_id,code,source_type,source_ref,source_occurrence_ref,status,created_by) values (?,?,?,?,?,'DRAFT',?) returning id",
+                w, "PN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(),
+                required(p, "sourceType"), required(p, "sourceRef"), UUID.randomUUID().toString(),
+                g.actor());
+        int n = 0;
+        for (var l : lines) {
+            long sku = lng(l.get("skuId")), uom = lng(l.get("uomId"));
+            var factor = catalog.factor(sku, uom);
+            var entered = qty(l.get("qty"));
+            Problem.require(entered.signum() > 0, "QUANTITY", "Lượng dự kiến phải dương.");
+            db.run("insert into receipt_line(receipt_id,line_no,warehouse_id,sku_id,uom_id,expected_qty,entered_qty,conversion_factor) values (?,?,?,?,?,?,?,?)",
+                    id, ++n, w, sku, uom, catalog.base(entered, factor), entered, factor);
+        }
+        return detail(w, id);
+    }
+
+    /**
+     * Người viết: Khuất Văn Nam
+     * Ngày viết: 2026-11-10
+     * Use case: UC-IN-001, UC-IN-002, UC-IN-003, UC-IN-004, UC-IN-005, UC-IN-006
+     *
+     * Thực hiện thao tác nhập kho theo trạng thái và phiên bản của phiếu.
+     * Khóa phiếu trước khi xử lý; chỉ chốt khi READY. Lệnh được gọi qua CommandBus để ghi tồn và
+     * kết quả chống lặp trong cùng giao dịch.
+     */
+    public Object action(long w, long id, String action, Map<String, Object> p) {
+        var r = db.one("select * from receipt where warehouse_id=? and id=? for update", w, id);
+        long version = lng(r.get("version"));
+        Problem.require(version == lng(p.get("version")), "STALE_VERSION",
+                "Phiếu đã thay đổi; tải lại.");
+        String status = r.get("status").toString(), next = status;
+        var lines = db.rows("select * from receipt_line where receipt_id=? order by line_no", id);
+        switch (action) {
+        // UC-IN-001: Chỉ sửa phiếu nháp hoặc bị trả lại; giữ SKU và đơn vị của từng dòng.
+        case "update": {
+            g.roles("ACT03");
+            Problem.require(Set.of("DRAFT", "RETURNED").contains(status), "STATE",
+                    "Chỉ sửa nháp hoặc phiếu trả lại.");
+            @SuppressWarnings("unchecked")
+            var updates = (List<Map<String, Object>>) p.get("lines");
+            Problem.require(updates != null && updates.size() == lines.size(), "LINES",
+                    "Cần đủ các dòng hiện có.");
+            Set<Long> seen = new HashSet<>();
+            for (var l : updates) {
+                long no = lng(l.get("lineNo"));
+                Problem.require(seen.add(no), "LINES", "Dòng bị lặp.");
+                var src = db.one("select * from receipt_line where receipt_id=? and line_no=?", id,
+                        no);
+                BigDecimal entered = qty(l.get("qty"));
+                Problem.require(entered.signum() > 0, "QUANTITY", "Lượng phải dương.");
+                db.run("update receipt_line set entered_qty=?,expected_qty=?,received_qty=null,accepted_qty=null,blocked_qty=0 where receipt_id=? and line_no=?",
+                        entered, catalog.base(entered, dec(src.get("conversion_factor"))), id, no);
+            }
+            db.run("update receipt set source_type=?,source_ref=? where id=?",
+                    required(p, "sourceType"), required(p, "sourceRef"), id);
+            next = "DRAFT";
+            break;
+        }
+        // UC-IN-003: Lưu giải trình nháp, chưa tạo hồ sơ duyệt.
+        case "save-discrepancy":
+            g.roles("ACT03");
+            Problem.require(status.equals("DISCREPANCY"), "STATE", "Phiếu không có sai lệch.");
+            db.run("update receipt set discrepancy_draft=?::jsonb where id=?", json.write(p), id);
+            break;
+        // UC-IN-001: Gửi phiếu sang bước kiểm nhận.
+        case "submit":
+            g.roles("ACT03");
+            Problem.require(Set.of("DRAFT", "RETURNED").contains(status), "STATE",
+                    "Phiếu không ở trạng thái gửi.");
+            next = "RECEIVING";
+            break;
+        // UC-IN-002: Nhận đủ kết quả từng dòng; có lệch hoặc hàng bị chặn thì cần giải trình.
+        case "receive": {
+            g.roles("ACT03");
+            Problem.require(Set.of("RECEIVING", "DISCREPANCY").contains(status), "STATE",
+                    "Phiếu không ở bước kiểm nhận.");
+            @SuppressWarnings("unchecked")
+            var inputs = (List<Map<String, Object>>) p.get("lines");
+            Problem.require(inputs != null && inputs.size() == lines.size(), "LINES",
+                    "Gửi đủ mọi dòng kiểm nhận.");
+            Set<Long> seen = new HashSet<>();
+            boolean discrepancy = false;
+            for (var l : inputs) {
+                long no = lng(l.get("lineNo"));
+                Problem.require(seen.add(no), "LINES", "Dòng bị lặp.");
+                var original = db.one("select * from receipt_line where receipt_id=? and line_no=?",
+                        id, no);
+                long loc = lng(l.get("locationId"));
+                db.one("select * from location where warehouse_id=? and id=? and kind='BIN' and active for share",
+                        w, loc);
+                BigDecimal received = qty(l.get("receivedQty")),
+                        blocked = qty(l.getOrDefault("blockedQty", "0"));
+                Problem.require(blocked.compareTo(received) <= 0, "QUANTITY",
+                        "Lượng bị chặn lớn hơn thực nhận.");
+                discrepancy |= received.compareTo(dec(original.get("expected_qty"))) != 0
+                        || blocked.signum() > 0;
+                db.run("update receipt_line set location_id=?,received_qty=?,accepted_qty=?,blocked_qty=?,condition_note=? where receipt_id=? and line_no=?",
+                        loc, received, received, blocked, text(l, "conditionNote"), id, no);
+            }
+            next = discrepancy ? "DISCREPANCY" : "READY";
+            break;
+        }
+        // UC-IN-003: Trình bản chụp sai lệch ở phiên bản kế tiếp của phiếu.
+        case "discrepancy":
+            g.roles("ACT03");
+            Problem.require(status.equals("DISCREPANCY"), "STATE", "Không có sai lệch để trình.");
+            required(p, "reason");
+            db.run("update receipt set discrepancy_draft=?::jsonb where id=?", json.write(p), id);
+            approval.submit(w, "receipt", id, version + 1, r.get("created_by").toString(),
+                    BigDecimal.ZERO, detail(w, id), false);
+            next = "PENDING";
+            break;
+        // UC-IN-004: Quyết định hợp lệ mới đưa phiếu về READY hoặc RETURNED.
+        case "decision": {
+            Problem.require(status.equals("PENDING"), "STATE", "Phiếu không chờ duyệt.");
+            boolean accept = Boolean.TRUE.equals(p.get("accept"));
+            approval.decide(w, "receipt", id, version, accept, text(p, "reason"));
+            next = accept ? "READY" : "RETURNED";
+            break;
+        }
+        // UC-IN-005: Khóa và cộng tồn theo cặp vị trí/SKU trước khi chuyển POSTED.
+        case "confirm": {
+            g.roles("ACT03");
+            Problem.require(status.equals("READY"), "STATE", "Phiếu chưa đủ điều kiện chốt.");
+            List<StockService.Key> keys = lines.stream()
+                    .map(l -> new StockService.Key(lng(l.get("location_id")), lng(l.get("sku_id"))))
+                    .toList();
+            stock.lock(w, keys);
+            long batch = stock.batch(w, "IN", id);
+            Map<StockService.Key, BigDecimal[]> totals = new TreeMap<>();
+            for (var l : lines) {
+                var k = new StockService.Key(lng(l.get("location_id")), lng(l.get("sku_id")));
+                var t = totals.computeIfAbsent(k,
+                        x -> new BigDecimal[] { BigDecimal.ZERO, BigDecimal.ZERO, });
+                t[0] = t[0].add(dec(l.get("accepted_qty")));
+                t[1] = t[1].add(dec(l.get("blocked_qty")));
+            }
+            for (var e : totals.entrySet())
+                if (e.getValue()[0].signum() != 0)
+                    stock.movement(w, batch, e.getKey(), e.getValue()[0], e.getValue()[1]);
+            next = "POSTED";
+            break;
+        }
+        // UC-IN-006: Hủy phiếu chưa chốt và vô hiệu hồ sơ duyệt còn chờ.
+        case "cancel":
+            g.roles("ACT02", "ACT03");
+            required(p, "reason");
+            Problem.require(!Set.of("POSTED", "CANCELLED").contains(status), "STATE",
+                    "Không thể hủy phiếu đã chốt/hủy.");
+            approval.cancel("receipt", id);
+            next = "CANCELLED";
+            break;
+        default:
+            throw new IllegalArgumentException("Unknown receipt action");
+        }
+        db.run("update receipt set status=?,version=version+1 where id=?", next, id);
+        return detail(w, id);
+    }
 }
